@@ -421,4 +421,166 @@ with tabs[0]:
                 st.write("")
                 x1, x2, x3 = st.columns(3)
                 with x1: d_m("Dividend", dy, dy_src, "div", "{:.2%}", cl=lambda x: "g" if x>0.03 else "b")
-                with x2: d_m("Beta", beta
+                with x2: d_m("Beta", beta, "Yahoo", "beta", "{:.2f}", cl=lambda x: "g" if x<0.8 else "o")
+                with x3: d_m("Marge", marg, "Yahoo", "margin", "{:.1%}", cl=lambda x: "g" if x>0.2 else "b")
+
+                st.markdown("### 📈 Koers")
+                fig = go.Figure()
+                lc = '#00C805' if hist['Close'].iloc[-1] >= hist['Close'].iloc[0] else '#FF5000'
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', line=dict(color=lc)))
+                fig.update_layout(template="plotly_dark", margin=dict(t=10,b=0,l=0,r=0), height=350)
+                st.plotly_chart(fig, use_container_width=True)
+
+                cn, cv = st.columns(2)
+                with cn:
+                    st.markdown("### 📰 Nieuws")
+                    for n in get_google_news(safe_get(info, 'shortName', sel_ticker)):
+                        st.markdown(f"**[{n['title']}]({n['link']})**")
+                        st.divider()
+                with cv:
+                    st.markdown("### 📺 Video")
+                    vid = get_youtube_video_id(safe_get(info, 'shortName', sel_ticker))
+                    if vid: st.video(f"https://www.youtube.com/watch?v={vid}")
+        except Exception as e: st.error(f"Fout: {e}")
+
+# ==================================================
+# 2. PORTFOLIO
+# ==================================================
+with tabs[1]:
+    st.title("Portfolio")
+    
+    if st.session_state['portfolio']:
+        rows = []
+        sec_dist = {}
+        div_cal = []
+        
+        total_val = 0
+        total_inv = 0
+        
+        bar = st.progress(0)
+        items = st.session_state['portfolio']
+        for i, item in enumerate(items):
+            try:
+                t = item['ticker']
+                s = yf.Ticker(t)
+                h = s.history(period="1d")
+                
+                p_eur = 0
+                rate = 1.0
+                
+                if not h.empty:
+                    raw = h['Close'].iloc[-1]
+                    curr = safe_get(s.info, 'currency', 'EUR')
+                    rate = get_currency_rate(curr, "EUR")
+                    p_eur = raw * rate
+                else:
+                    p_eur = item['avg_price_eur']
+                
+                val = p_eur * item['amount']
+                cost = item['avg_price_eur'] * item['amount']
+                
+                total_val += val
+                total_inv += cost
+                
+                sec = safe_get(s.info, 'sector', 'Overig')
+                sec_dist[sec] = sec_dist.get(sec, 0) + val
+                
+                dr = safe_get(s.info, 'dividendRate')
+                if not dr:
+                    dy = safe_get(s.info, 'dividendYield')
+                    if dy and p_eur>0: dr = dy * (p_eur/rate)
+                if dr:
+                    dy_eur = dr * rate * item['amount']
+                    ex = safe_get(s.info, 'exDividendDate')
+                    exs = datetime.fromtimestamp(ex).strftime('%d-%m') if ex else "-"
+                    div_cal.append({"Ticker": t, "Ex": exs, "Jaar (€)": dy_eur})
+                    
+                rows.append({
+                    "Ticker": t,
+                    "Aantal": item['amount'],
+                    "GAK": item['avg_price_eur'],
+                    "Prijs": p_eur,
+                    "Waarde": val,
+                    "Winst": val - cost,
+                    "Rend %": ((val-cost)/cost)*100 if cost else 0
+                })
+            except: pass
+            bar.progress((i+1)/len(st.session_state['portfolio']))
+        bar.empty()
+        
+        prof = total_val - total_inv
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Waarde", f"€ {total_val:,.2f}")
+        k2.metric("Winst", f"€ {prof:,.2f}", delta=f"{(prof/total_inv)*100:.1f}%" if total_inv else "0%")
+        k3.metric("Inleg", f"€ {total_inv:,.2f}")
+        st.divider()
+        
+        c_pie, c_div = st.columns(2)
+        with c_pie:
+            st.subheader("Verdeling")
+            if total_val > 0 and sec_dist:
+                fig = px.pie(values=list(sec_dist.values()), names=list(sec_dist.keys()), hole=0.4)
+                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=200)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with c_div:
+            st.subheader("Dividend")
+            if div_cal:
+                df_d = pd.DataFrame(div_cal)
+                st.metric("Mnd Inkomen", f"€ {df_d['Jaar (€)'].sum()/12:.2f}")
+                st.dataframe(df_d, hide_index=True, use_container_width=True)
+            else: st.info("Geen dividend.")
+            
+        st.subheader("Details")
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        
+        if st.button("Alles Wissen"):
+            st.session_state['portfolio'] = []
+            st.rerun()
+            
+    else: st.info("Geen portfolio data.")
+
+# ==================================================
+# 3. WISHLIST
+# ==================================================
+with tabs[2]:
+    st.title("Wishlist")
+    if st.session_state['wishlist']:
+        for item in st.session_state['wishlist']:
+            t = item['ticker']
+            try:
+                s = yf.Ticker(t)
+                h = s.history(period="2d")
+                if not h.empty:
+                    rate = get_currency_rate(safe_get(s.info, 'currency', 'EUR'), "EUR")
+                    cp = h['Close'].iloc[-1] * rate
+                    pp = h['Close'].iloc[0] * rate
+                    pct = ((cp-pp)/pp)*100
+                    
+                    wi = s.info
+                    # Basic score
+                    pe = safe_get(wi, 'trailingPE')
+                    g = safe_get(wi, 'earningsGrowth')
+                    p_sc = pe/(g*100) if pe and g else None
+                    sd = {'peg': p_sc, 'roe': safe_get(wi, 'returnOnEquity'), 'de': safe_get(wi, 'debtToEquity'), 'cr': safe_get(wi, 'currentRatio')}
+                    if sd['de']: sd['de'] /= 100
+                    sc, _, _, _ = calculate_score(sd)
+                    scol = "green" if sc>=7 else ("orange" if sc>=5.5 else "red")
+                else: cp=0; pct=0; sc=0; scol="gray"
+            except: cp=0; pct=0; sc=0; scol="gray"
+
+            c1, c2 = st.columns([3, 1])
+            with c1: 
+                st.markdown(f"**{item['name']}** ({t})")
+                st.caption(f"€ {cp:.2f} (:{'green' if pct>=0 else 'red'}[{pct:+.1f}%]) | AI: :{scol}[{sc:.1f}]")
+            with c2:
+                if st.button("🔎", key=f"wl_{t}"):
+                    st.session_state['search_query'] = t
+                    st.toast("Check Analyse!", icon="🚀")
+                    st.rerun()
+            st.divider()
+            
+        if st.button("Legen"):
+            st.session_state['wishlist'] = []
+            st.rerun()
+    else: st.info("Leeg.")

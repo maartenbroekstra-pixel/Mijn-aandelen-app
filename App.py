@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import requests
 import json
 import re
@@ -97,25 +96,21 @@ def search_yahoo(query):
 
 @st.cache_data(ttl=3600)
 def find_primary_ticker(company_name):
-    """Zoekt agressief naar de US hoofdnotering (incl ADRs voor Heineken e.d.)"""
+    """Zoekt STRICT naar de US ticker (geen punt, max 5 letters)"""
     try:
-        # 1. Schoonmaak: Haal juridische termen weg
-        # Let op: ook N.V., B.V., A/S etc.
+        # Schoonmaken
         base_name = re.split(r' (Inc|Corp|Corporation|Hldgs|Holdings|Group|Grp|AG|SE|PLC|Ltd|GmbH|S\.A\.|NV|N\.V\.|B\.V\.|Co\.|DL-|DRc)', company_name, flags=re.IGNORECASE)[0]
         base_name = base_name.strip()
         
-        # 2. Zoeken in US regio
         headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={base_name}&lang=en-US&region=US&quotesCount=5"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={base_name}&lang=en-US&region=US&quotesCount=10"
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         
         if 'quotes' in data:
             for q in data['quotes']:
                 sym = q['symbol']
-                # 3. Filter: 
-                # - Geen punt (geen .DE, .AS)
-                # - Lengte < 6 (dus wel HEINY of ASML, maar geen lange OTC codes)
+                # Filter: Mag geen punt bevatten (geen .AS, .DE) en moet kort zijn (ADR of normaal)
                 if "." not in sym and len(sym) <= 5: 
                     return sym
     except: pass
@@ -155,48 +150,42 @@ def calculate_score(metrics):
     total = 0
     opps, risks, neut = [], [], []
     
-    # PEG
     peg = metrics.get('peg')
     if peg is not None:
         total += 1
-        if 0 < peg < 1.5: score += 1; opps.append(f"PEG ({peg:.2f}) is aantrekkelijk.")
-        elif peg < 0: risks.append("Negatieve PEG (Krimp).")
+        if 0 < peg < 1.5: score += 1; opps.append(f"PEG ({peg:.2f}) aantrekkelijk.")
+        elif peg < 0: risks.append("Negatieve PEG.")
         elif peg > 2.5: risks.append(f"Hoge PEG ({peg:.2f}).")
-        else: score += 0.5; neut.append(f"PEG ({peg:.2f}) marktconform.")
+        else: score += 0.5; neut.append(f"PEG ({peg:.2f}) normaal.")
     
-    # Fwd PE
     fwd = metrics.get('fwd_pe')
     if fwd is not None:
         total += 1
-        if 0 < fwd < 20: score += 1; opps.append(f"Lage Forward P/E ({fwd:.1f}).")
-        elif fwd > 40: risks.append(f"Hoge Forward P/E ({fwd:.1f}).")
-        else: score += 0.5; neut.append(f"Forward P/E ({fwd:.1f}) redelijk.")
+        if 0 < fwd < 20: score += 1; opps.append(f"Fwd P/E ({fwd:.1f}) laag.")
+        elif fwd > 40: risks.append(f"Fwd P/E ({fwd:.1f}) hoog.")
+        else: score += 0.5; neut.append(f"Fwd P/E ({fwd:.1f}) redelijk.")
         
-    # ROE
     roe = metrics.get('roe')
     if roe is not None:
         total += 1
         if roe > 0.15: score += 1; opps.append(f"Sterke ROE ({roe:.1%}).")
         elif roe < 0.05: risks.append(f"Zwakke ROE ({roe:.1%}).")
-        else: score += 0.5; neut.append(f"ROE ({roe:.1%}) gemiddeld.")
+        else: score += 0.5; neut.append(f"ROE ({roe:.1%}) normaal.")
         
-    # Debt
     de = metrics.get('de')
     if de is not None:
         total += 1
-        if de < 1.0: score += 1; opps.append("Gezonde balans (weinig schuld).")
-        elif de > 2.0: risks.append(f"Veel schulden (D/E: {de:.2f}).")
-        else: score += 0.5; neut.append("Schuldniveau acceptabel.")
+        if de < 1.0: score += 1; opps.append("Weinig schuld.")
+        elif de > 2.0: risks.append(f"Veel schuld (D/E: {de:.2f}).")
+        else: score += 0.5; neut.append("Schuld acceptabel.")
         
-    # Current Ratio
     cr = metrics.get('cr')
     if cr is not None:
         total += 1
         if cr > 1.5: score += 1; opps.append("Goede liquiditeit.")
-        elif cr < 1.0: risks.append("Krap bij kas (<1.0).")
+        elif cr < 1.0: risks.append("Krap bij kas.")
         else: score += 0.5; neut.append("Liquiditeit voldoende.")
         
-    # P/B
     pb = metrics.get('pb')
     if pb is not None:
         total += 1
@@ -211,16 +200,17 @@ def calculate_score(metrics):
 def save_data():
     return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
-def load_data(f):
+def load_data(uploaded_file):
     try:
-        d = json.load(f)
+        uploaded_file.seek(0) # FIX: Reset pointer
+        d = json.load(uploaded_file)
         if isinstance(d, list): st.session_state['portfolio'] = d
         else:
             st.session_state['portfolio'] = d.get('portfolio', [])
             st.session_state['wishlist'] = d.get('wishlist', [])
         st.success("✅ Data geladen!")
-        st.rerun() # FIX: DIRECT HERLADEN
-    except: st.error("Fout bestand.")
+        st.rerun() # FIX: Forceer refresh
+    except Exception as e: st.error(f"Fout bij laden: {e}")
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data")
@@ -228,7 +218,7 @@ st.sidebar.download_button("⬇️ Download Alles", save_data(), "aandelen_data.
 up = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
 if up: load_data(up)
 st.sidebar.divider()
-st.sidebar.info("Tip: .AS (Amsterdam) en .DE (Xetra) staan bovenaan bij zoeken.")
+st.sidebar.info("Tip: Xetra/Euro tickers staan bovenaan.")
 
 # --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
@@ -240,14 +230,14 @@ with tabs[0]:
     c_search, c_period = st.columns([3, 1])
     with c_search:
         def_q = st.session_state.get('search_query', "")
-        txt = st.text_input("Zoek Aandeel:", value=def_q, placeholder="Bijv. Heineken, ASML...", key="search")
+        txt = st.text_input("Zoek Aandeel:", value=def_q, placeholder="Bijv. Heineken, PDD...", key="search")
         
         sel_ticker = None
         if txt and "." in txt and " " not in txt: sel_ticker = txt
         elif txt:
             res = search_yahoo(txt)
             if res:
-                ch = st.selectbox("Resultaten (Lokale beurs prioriteit):", res)
+                ch = st.selectbox("Resultaten (Lokale beurs eerst):", res)
                 sel_ticker = ch.split(" | ")[0]
             else: sel_ticker = txt.upper()
             
@@ -267,15 +257,15 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # SMART DATA MERGE (Heineken Fix)
+                # --- SMART METRICS ---
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # Trigger: Als cruciale data mist (PEG, Fwd PE, etc.)
                 check_keys = ['forwardPE', 'pegRatio', 'targetMeanPrice', 'trailingPE']
                 missing_data = any(safe_get(info, k) is None for k in check_keys)
                 
                 if missing_data:
+                    # Zoek US Parent (bv HEINY voor Heineken)
                     short_name = safe_get(info, 'shortName', '')
                     us_ticker = find_primary_ticker(short_name)
                     
@@ -283,11 +273,9 @@ with tabs[0]:
                         us_stock = yf.Ticker(us_ticker)
                         metrics_info = us_stock.info
                         metrics_ticker = us_ticker
-                        # st.toast(f"Data verrijkt via: {us_ticker}", icon="🇺🇸")
 
                 fin = get_finviz_data(metrics_ticker)
 
-                # Metrics
                 pe = safe_get(metrics_info, 'trailingPE')
                 fwd_pe = safe_get(metrics_info, 'forwardPE')
                 if fwd_pe is None: fwd_pe = fin.get('fwd_pe')
@@ -329,19 +317,17 @@ with tabs[0]:
                 
                 tgt = safe_get(metrics_info, 'targetMeanPrice')
                 if tgt is None: tgt = fin.get('target')
-                
                 tgt_curr = safe_get(metrics_info, 'currency', 'USD')
                 tgt_rate = get_currency_rate(tgt_curr, "EUR")
                 tgt_eur = tgt * tgt_rate if tgt else None
                 upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%" if tgt_eur else ""
 
-                # UI
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     nm = safe_get(info, 'shortName', sel_ticker)
                     st.title(truncate_text(nm))
-                    st.caption(f"{sel_ticker} | {safe_get(info, 'exchange', '-')} | Data: {metrics_ticker}")
+                    st.caption(f"{sel_ticker} | Data: {metrics_ticker}")
                 with c2: st.metric("Koers", f"€ {price_eur:.2f}")
                 with c3: st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside)
                 with c4:
@@ -452,7 +438,6 @@ with tabs[0]:
 # ==================================================
 with tabs[1]:
     st.title("Mijn Portfolio")
-    
     if st.session_state['portfolio']:
         rows = []
         tot_inv = 0
@@ -501,7 +486,7 @@ with tabs[1]:
                     "Ticker": t,
                     "Aantal": item['amount'],
                     "GAK (€)": item['avg_price_eur'],
-                    "Huidige Prijs (€)": p_eur,
+                    "Koers (€)": p_eur,
                     "Waarde (€)": val,
                     "Winst (€)": prof,
                     "Rendement (%)": (prof/cost)*100 if cost>0 else 0
@@ -538,7 +523,7 @@ with tabs[1]:
 
         st.subheader("Details")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config={
-            "Huidige Prijs (€)": st.column_config.NumberColumn(format="€ %.2f"),
+            "Koers (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Waarde (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Winst (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Rendement (%)": st.column_config.NumberColumn(format="%.1f%%")
@@ -572,16 +557,76 @@ with tabs[1]:
 # ==================================================
 with tabs[2]:
     st.title("❤️ Mijn Wishlist")
+    
     if st.session_state['wishlist']:
         for item in st.session_state['wishlist']:
+            ticker = item['ticker']
+            
+            # Data ophalen voor wishlist card (Live koers & Score)
+            try:
+                w_stock = yf.Ticker(ticker)
+                w_hist = w_stock.history(period="2d") # 2 dagen voor dagverschil
+                
+                curr = safe_get(w_stock.info, 'currency', 'EUR')
+                rate = get_currency_rate(curr, "EUR")
+                
+                if not w_hist.empty:
+                    curr_price = w_hist['Close'].iloc[-1] * rate
+                    prev_price = w_hist['Close'].iloc[0] * rate
+                    change_pct = ((curr_price - prev_price) / prev_price) * 100
+                    
+                    # Snelle Score check (alleen Yahoo data voor snelheid)
+                    wi = w_stock.info
+                    w_peg = safe_get(wi, 'pegRatio')
+                    if w_peg is None: # Fallback
+                        pe = safe_get(wi, 'trailingPE')
+                        g = safe_get(wi, 'earningsGrowth')
+                        if pe and g: w_peg = pe/(g*100)
+                    
+                    w_score_dict = {
+                        'peg': w_peg, 
+                        'roe': safe_get(wi, 'returnOnEquity'),
+                        'de': safe_get(wi, 'debtToEquity'), # ruwe waarde is ok voor check
+                        'cr': safe_get(wi, 'currentRatio')
+                    }
+                    # Normlizeer DE voor score
+                    if w_score_dict['de']: w_score_dict['de'] /= 100
+                    
+                    w_score, _, _, _ = calculate_score(w_score_dict)
+                    score_color = "green" if w_score >= 7 else ("orange" if w_score >= 5.5 else "red")
+                else:
+                    curr_price = 0
+                    change_pct = 0
+                    w_score = 0
+                    score_color = "gray"
+            except:
+                curr_price = 0
+                change_pct = 0
+                w_score = 0
+                score_color = "gray"
+
+            # Wishlist Card Design
             with st.container(border=True):
-                c1, c2 = st.columns([4, 1])
-                with c1: st.subheader(f"{item['name']} ({item['ticker']})")
+                c1, c2, c3, c4 = st.columns([3, 2, 1, 1])
+                
+                with c1:
+                    st.markdown(f"**{item['name']}**")
+                    st.caption(ticker)
+                
                 with c2:
-                    if st.button("🔍 Analyseer", key=f"w_{item['ticker']}"):
-                        st.session_state['search_query'] = item['ticker']
+                    st.markdown(f"**€ {curr_price:.2f}**")
+                    color_txt = "green" if change_pct >= 0 else "red"
+                    st.markdown(f":{color_txt}[{change_pct:+.2f}%]")
+                
+                with c3:
+                    st.markdown(f"**AI:** :{score_color}[{w_score:.1f}]")
+
+                with c4:
+                    if st.button("🔎", key=f"w_{ticker}"):
+                        st.session_state['search_query'] = ticker
                         st.toast("Ga naar Tabblad Analyse!", icon="🚀")
+        
         if st.button("Legen"):
             st.session_state['wishlist'] = []
             st.rerun()
-    else: st.info("Leeg.")
+    else: st.info("Je wishlist is nog leeg.")

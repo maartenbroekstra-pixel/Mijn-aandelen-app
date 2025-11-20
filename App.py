@@ -16,13 +16,27 @@ st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- MAPPING (EU -> US voor data) ---
+# --- TOOLTIPS & UITLEG (Centrale opslag) ---
+TOOLTIPS = {
+    "peg": "Prijs/Winst gedeeld door de Groei.\n\n🟢 < 1.5: Aandeel is goedkoop t.o.v. de groei.\n🔴 Negatief: Winst krimp of verlies.\n🟠 > 2.5: Hoge verwachtingen ingeprijsd.",
+    "fwd_pe": "Verwachte Koers/Winst verhouding voor het komende jaar.\n\n🟢 < 20: Vaak aantrekkelijk gewaardeerd.\n🟠 > 30: Aandeel wordt als 'duur' of 'groei' gezien.",
+    "roe": "Return on Equity (Rendement op Eigen Vermogen).\n\n🟢 > 15%: Management gaat efficiënt om met geld van aandeelhouders.\n🔴 < 5%: Lage winstgevendheid.",
+    "de": "Debt to Equity (Schuldratio).\n\n🟢 < 1.0: Gezonde balans, weinig schulden.\n🔴 > 2.0: Hoog risico door veel leningen.",
+    "cr": "Current Ratio (Liquiditeit).\n\n🟢 > 1.5: Genoeg cash om rekeningen op korte termijn te betalen.\n🔴 < 1.0: Krap bij kas.",
+    "pb": "Price to Book (Koers / Boekwaarde).\n\n🟢 < 3.0: Koers ligt dicht bij de werkelijke waarde van bezittingen.\n⚪ Hoge P/B is normaal bij tech-bedrijven (weinig fabrieken, veel IP).",
+    "div": "Dividend Rendement (Jaarlijks).\n\n🟢 > 3%: Aantrekkelijk voor passief inkomen.\n⚪ Laag dividend is normaal voor snelle groeiers.",
+    "beta": "Volatiliteit t.o.v. de markt (1.0).\n\n🟢 < 0.8: Defensief/Stabiel.\n🔴 > 1.5: Wild/Risicovol.",
+    "rsi": "Relative Strength Index (Momentum).\n\n🟢 < 30: Oversold (Potentiële koopkans).\n🔴 > 70: Overbought (Misschien te duur).",
+    "margin": "Netto Winstmarge.\n\n🟢 > 20%: Zeer winstgevend bedrijf.\n🔴 < 0%: Verlieslatend."
+}
+
+# --- MAPPING ---
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
     "SIE.DE": "SIEGY", "ALV.DE": "ALIZY", "AIR.PA": "EADSY", "MC.PA": "LVMUY",
     "OR.PA": "LRLCY", "ASML.AS": "ASML", "PHIA.AS": "PHG", "INGA.AS": "ING",
-    "MT.AS": "MT"
+    "MT.AS": "MT", "2PP.DE": "PYPL"
 }
 
 # --- HULPFUNCTIES ---
@@ -60,36 +74,15 @@ def get_finviz_data(ticker):
         data = {}
         if r.status_code == 200:
             text = r.text
-            # Helper regex
             def parse(pat):
                 m = re.search(pat, text, re.DOTALL)
                 return float(m.group(1)) if m else None
-            
             data['peg'] = parse(r'>PEG<.*?<b>\s*([\d\.]+)\s*</b>')
             data['pb'] = parse(r'>P/B<.*?<b>\s*([\d\.]+)\s*</b>')
             data['fwd_pe'] = parse(r'>Forward P/E<.*?<b>\s*([\d\.]+)\s*</b>')
             data['target'] = parse(r'>Target Price<.*?<b>\s*([\d\.]+)\s*</b>')
         return data
     except: return {}
-
-def get_metric_with_source(yahoo_info, finviz_data, yahoo_key, finviz_key, calc_func=None):
-    """Probeert Yahoo -> Finviz -> Berekening en geeft waarde + bron terug"""
-    # 1. Yahoo
-    val = safe_get(yahoo_info, yahoo_key)
-    if val is not None: return val, "Yahoo"
-    
-    # 2. Finviz
-    if finviz_key and finviz_key in finviz_data and finviz_data[finviz_key] is not None:
-        return finviz_data[finviz_key], "Finviz"
-        
-    # 3. Berekening
-    if calc_func:
-        try:
-            c_val = calc_func()
-            if c_val is not None: return c_val, "Berekend"
-        except: pass
-        
-    return None, "Niet beschikbaar"
 
 def search_yahoo(query):
     try:
@@ -163,78 +156,38 @@ def calculate_score(metrics):
     total = 0
     opps, risks, neut = [], [], []
     
+    # Helper voor checks
+    def check(val, name, good_cond, bad_cond):
+        nonlocal score, total
+        if val is not None:
+            total += 1
+            if good_cond(val): 
+                score += 1; opps.append(f"{name} ({val:.2f}) is sterk.")
+            elif bad_cond(val): 
+                risks.append(f"{name} ({val:.2f}) is zwak.")
+            else: 
+                score += 0.5; neut.append(f"{name} ({val:.2f}) is neutraal.")
+
     peg = metrics.get('peg')
     if peg is not None:
         total += 1
-        if 0 < peg < 1.5: score += 1; opps.append(f"PEG ({peg:.2f}) aantrekkelijk.")
-        elif peg < 0: risks.append("Negatieve PEG.")
+        if 0 < peg < 1.5: score += 1; opps.append(f"PEG ({peg:.2f}) wijst op onderwaardering.")
+        elif peg < 0: risks.append("Negatieve PEG (Krimp).")
         elif peg > 2.5: risks.append(f"Hoge PEG ({peg:.2f}).")
-        else: score += 0.5; neut.append(f"PEG ({peg:.2f}) normaal.")
-    
-    fwd = metrics.get('fwd_pe')
-    if fwd is not None:
-        total += 1
-        if 0 < fwd < 20: score += 1; opps.append(f"Fwd P/E ({fwd:.1f}) laag.")
-        elif fwd > 40: risks.append(f"Fwd P/E ({fwd:.1f}) hoog.")
-        else: score += 0.5; neut.append(f"Fwd P/E ({fwd:.1f}) redelijk.")
-        
-    roe = metrics.get('roe')
-    if roe is not None:
-        total += 1
-        if roe > 0.15: score += 1; opps.append(f"Sterke ROE ({roe:.1%}).")
-        elif roe < 0.05: risks.append(f"Zwakke ROE ({roe:.1%}).")
-        else: score += 0.5; neut.append(f"ROE ({roe:.1%}) gemiddeld.")
-        
-    de = metrics.get('de')
-    if de is not None:
-        total += 1
-        if de < 1.0: score += 1; opps.append("Weinig schuld.")
-        elif de > 2.0: risks.append(f"Veel schuld (D/E: {de:.2f}).")
-        else: score += 0.5; neut.append("Schuld acceptabel.")
-        
-    cr = metrics.get('cr')
-    if cr is not None:
-        total += 1
-        if cr > 1.5: score += 1; opps.append("Goede liquiditeit.")
-        elif cr < 1.0: risks.append("Krap bij kas.")
-        else: score += 0.5; neut.append("Liquiditeit voldoende.")
-        
-    pb = metrics.get('pb')
-    if pb is not None:
-        total += 1
-        if 0 < pb < 3.0: score += 1; opps.append("Koers dichtbij boekwaarde.")
-        elif pb > 10: risks.append(f"Hoge P/B ({pb:.2f}).")
-        else: score += 0.5; neut.append("P/B normaal.")
+        else: score += 0.5; neut.append(f"PEG ({peg:.2f}) is marktconform.")
+
+    check(metrics.get('fwd_pe'), "Fwd P/E", lambda x: 0<x<20, lambda x: x>40)
+    check(metrics.get('roe'), "ROE", lambda x: x>0.15, lambda x: x<0.05)
+    check(metrics.get('de'), "Debt/Equity", lambda x: x<1.0, lambda x: x>2.0)
+    check(metrics.get('cr'), "Current Ratio", lambda x: x>1.5, lambda x: x<1.0)
+    check(metrics.get('pb'), "P/B", lambda x: 0<x<3.0, lambda x: x>10)
 
     final = (score / total) * 10 if total > 0 else 5.0
     return final, opps, risks, neut
 
-# --- FILE MANAGER (CALLBACK METHODE) ---
-def handle_upload():
-    """Deze functie runt direct na uploaden"""
-    uploaded_file = st.session_state.get('uploader')
-    if uploaded_file is not None:
-        try:
-            uploaded_file.seek(0)
-            data = json.load(uploaded_file)
-            
-            # Support voor oude list-format en nieuwe dict-format
-            if isinstance(data, list): 
-                st.session_state['portfolio'] = data
-                st.session_state['wishlist'] = []
-            else:
-                st.session_state['portfolio'] = data.get('portfolio', [])
-                st.session_state['wishlist'] = data.get('wishlist', [])
-                
-            st.toast("✅ Data geladen!", icon="💾")
-        except Exception as e:
-            st.error(f"Fout: {e}")
-
-def get_download_data():
-    return json.dumps({
-        'portfolio': st.session_state['portfolio'], 
-        'wishlist': st.session_state['wishlist']
-    })
+# --- SAVE/LOAD (SIMPEL & ROBUUST) ---
+def save_data():
+    return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data Beheer")
@@ -242,21 +195,34 @@ st.sidebar.header("📂 Data Beheer")
 # Download
 st.sidebar.download_button(
     label="⬇️ Download Data",
-    data=get_download_data(),
+    data=save_data(),
     file_name="aandelen_data.json",
     mime="application/json"
 )
 
-# Upload met callback (voorkomt het 'hangen' van de app)
-st.sidebar.file_uploader(
-    "⬆️ Upload Data", 
-    type=['json'], 
-    key='uploader', 
-    on_change=handle_upload
-)
+# Upload - Directe processing
+uploaded_file = st.sidebar.file_uploader("⬆️ Upload Data", type=['json'])
+if uploaded_file:
+    try:
+        data = json.load(uploaded_file)
+        # Check structuur (Oud vs Nieuw)
+        if isinstance(data, list):
+            st.session_state['portfolio'] = data
+            # Wishlist blijft leeg bij oude file
+        elif isinstance(data, dict):
+            st.session_state['portfolio'] = data.get('portfolio', [])
+            st.session_state['wishlist'] = data.get('wishlist', [])
+        
+        st.sidebar.success(f"✅ {len(st.session_state['portfolio'])} aandelen geladen!")
+    except Exception as e:
+        st.sidebar.error(f"Fout: {e}")
 
 st.sidebar.divider()
-st.sidebar.info("Tip: Xetra/Euro tickers staan bovenaan.")
+st.sidebar.info("Tip: Xetra/Euro tickers staan bovenaan bij zoeken.")
+
+if st.sidebar.button("🔄 Cache Legen"):
+    st.cache_data.clear()
+    st.rerun()
 
 # --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
@@ -295,15 +261,15 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # --- DATA VERRIJKING ---
+                # SMART DATA
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # 1. Check hardcoded map
+                # 1. Check mapping
                 if sel_ticker in EU_TO_US_MAP:
                     metrics_ticker = EU_TO_US_MAP[sel_ticker]
                     metrics_info = yf.Ticker(metrics_ticker).info
-                # 2. Check dynamische parent search
+                # 2. Check dynamic parent
                 elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio', 'targetMeanPrice']):
                     short_name = safe_get(info, 'shortName', '')
                     us_ticker = find_primary_ticker(short_name)
@@ -313,51 +279,62 @@ with tabs[0]:
 
                 fin = get_finviz_data(metrics_ticker)
 
-                # --- METRICS MET BRONVERMELDING ---
-                
+                # METRICS HELPER
+                def get_val_src(y_key, f_key, fallback_calc=None):
+                    # 1. Yahoo
+                    val = safe_get(metrics_info, y_key)
+                    if val is not None: return val, "Yahoo"
+                    # 2. Finviz
+                    if f_key and f_key in fin and fin[f_key] is not None: return fin[f_key], "Finviz"
+                    # 3. Calc
+                    if fallback_calc:
+                        c = fallback_calc()
+                        if c is not None: return c, "Berekend"
+                    return None, "N/A"
+
                 # PEG
-                # Berekening Functie
                 def calc_peg():
                     p = safe_get(metrics_info, 'trailingPE') or safe_get(metrics_info, 'forwardPE')
                     g = safe_get(metrics_info, 'earningsGrowth')
-                    return p / (g*100) if p and g else None
-                
-                peg, peg_src = get_metric_with_source(metrics_info, fin, 'pegRatio', 'peg', calc_peg)
+                    return p/(g*100) if p and g else None
+                peg, peg_src = get_val_src('pegRatio', 'peg', calc_peg)
 
                 # Forward PE
-                fwd_pe, fwd_src = get_metric_with_source(metrics_info, fin, 'forwardPE', 'fwd_pe')
+                fwd_pe, fwd_src = get_val_src('forwardPE', 'fwd_pe')
                 
                 # P/B
-                pb, pb_src = get_metric_with_source(metrics_info, fin, 'priceToBook', 'pb')
-                
-                # Koersdoel
-                tgt, tgt_src = get_metric_with_source(metrics_info, fin, 'targetMeanPrice', 'target')
-                tgt_curr = safe_get(metrics_info, 'currency', 'USD') # Doel is vaak in USD
-                tgt_rate = get_currency_rate(tgt_curr, "EUR")
-                tgt_eur = tgt * tgt_rate if tgt else None
-                upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%" if tgt_eur else ""
+                pb, pb_src = get_val_src('priceToBook', 'pb')
 
-                # Overige (meestal goed in Yahoo)
-                de = safe_get(metrics_info, 'debtToEquity')
+                # Koersdoel
+                tgt, tgt_src = get_val_src('targetMeanPrice', 'target')
+                # Target valuta fix
+                if tgt:
+                    tgt_c = safe_get(metrics_info, 'currency', 'USD')
+                    tgt_r = get_currency_rate(tgt_c, "EUR")
+                    tgt_eur = tgt * tgt_r
+                    upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%"
+                else:
+                    tgt_eur, upside = None, ""
+
+                # Overige
+                de, de_src = safe_get(metrics_info, 'debtToEquity'), "Yahoo"
                 de_r = de/100 if de else None
-                de_src = "Yahoo" if de else "N/A"
+                if de is None: de_src = "N/A"
+
+                cr, cr_src = get_val_src('currentRatio', None)
+                roe, roe_src = get_val_src('returnOnEquity', None)
                 
-                cr = safe_get(metrics_info, 'currentRatio')
-                cr_src = "Yahoo" if cr else "N/A"
-                
-                roe = safe_get(metrics_info, 'returnOnEquity')
-                roe_src = "Yahoo" if roe else "N/A"
-                
-                dy = safe_get(metrics_info, 'dividendYield')
+                dy, dy_src = get_val_src('dividendYield', None)
                 if dy is None:
                     dr = safe_get(metrics_info, 'dividendRate')
-                    if dr: 
+                    if dr:
+                        # Prijs van metrics ticker (USD) nodig voor yield
                         try: 
                             mp = yf.Ticker(metrics_ticker).history(period="1d")['Close'].iloc[-1]
-                            dy = dr / mp
+                            dy = dr/mp; dy_src = "Berekend (Rate/Prijs)"
                         except: pass
                 if dy and dy > 0.5: dy = dy / 100
-                
+
                 beta = safe_get(metrics_info, 'beta')
                 marg = safe_get(metrics_info, 'profitMargins')
                 
@@ -394,7 +371,6 @@ with tabs[0]:
                                     st.session_state['wishlist'].append({"ticker": sel_ticker, "name": nm})
                                     st.toast("Toegevoegd!", icon="❤️")
 
-                # Score Calc
                 met_d = {'peg': peg, 'roe': roe, 'de': de_r, 'cr': cr, 'fwd_pe': fwd_pe, 'pb': pb}
                 score, opps, risks, neut = calculate_score(met_d)
                 
@@ -422,40 +398,44 @@ with tabs[0]:
                 st.divider()
                 st.subheader("📊 Ratio's")
                 m1, m2, m3, m4, m5, m6 = st.columns(6)
-                with m1:
-                    c = "🟢" if peg and 0<peg<1.5 else ("🟠" if peg and peg<0 else "🟡")
-                    st.metric("PEG Ratio", f"{c} {peg:.2f}" if peg else "N/A", help=f"Bron: {peg_src}")
-                with m2:
-                    c = "🟢" if fwd_pe and 0<fwd_pe<20 else "🟡"
-                    st.metric("Forward P/E", f"{c} {fwd_pe:.1f}" if fwd_pe else "N/A", help=f"Bron: {fwd_src}")
-                with m3:
-                    c = "🟢" if cr and cr>1.5 else "🟠"
-                    st.metric("Current Ratio", f"{c} {cr:.2f}" if cr else "N/A", help=f"Bron: {cr_src}")
-                with m4:
-                    c = "🟢" if de_r and de_r<1 else "🟠"
-                    st.metric("Debt/Equity", f"{c} {de_r:.2f}" if de_r else "N/A", help=f"Bron: {de_src}")
-                with m5:
-                    val = pb if pb else 0
-                    c = "🟢" if 0 < val < 3 else ("🟠" if val > 3 else "⚪")
-                    st.metric("P/B Ratio", f"{c} {val:.2f}" if pb else "N/A", help=f"Bron: {pb_src}")
-                with m6:
-                    c = "🟢" if roe and roe>0.15 else "🟡"
-                    st.metric("ROE", f"{c} {roe:.1%}" if roe else "N/A", help=f"Bron: {roe_src}")
+                
+                def disp_metric(label, val, src, tooltip_key, fmt="{:.2f}", color_logic=None):
+                    help_txt = f"**Bron:** {src}\n\n{TOOLTIPS.get(tooltip_key, '')}"
+                    if val is None:
+                        st.metric(label, "N/A", help=help_txt)
+                        return
+                    
+                    c = "normal"
+                    if color_logic:
+                        if color_logic(val) == "green": c = "off" # Streamlit hack: gebruik delta-color niet direct hier
+                        # We doen custom color in de value string als hack, of gewoon standaard streamlit logic
+                    
+                    # Simpele kleur logica in value string werkt niet in st.metric value, wel in delta.
+                    # We gebruiken de emoji techniek van eerder
+                    c_icon = "⚪"
+                    if color_logic:
+                        res = color_logic(val)
+                        if res == "green": c_icon = "🟢"
+                        elif res == "orange": c_icon = "🟠"
+                        elif res == "blue": c_icon = "🔵"
+                        elif res == "red": c_icon = "🔴"
+                    
+                    st.metric(label, f"{c_icon} {fmt.format(val)}", help=help_txt)
+
+                # Render Metrics
+                disp_metric("PEG Ratio", peg, peg_src, "peg", color_logic=lambda x: "green" if 0<x<1.5 else ("orange" if x<0 else "yellow"))
+                disp_metric("Forward P/E", fwd_pe, fwd_src, "fwd_pe", color_logic=lambda x: "green" if 0<x<20 else "yellow")
+                disp_metric("Current Ratio", cr, cr_src, "cr", color_logic=lambda x: "green" if x>1.5 else "orange")
+                disp_metric("Debt/Equity", de_r, de_src, "de", color_logic=lambda x: "green" if x<1 else "orange")
+                disp_metric("P/B Ratio", pb, pb_src, "pb", color_logic=lambda x: "green" if 0<x<3 else "yellow")
+                disp_metric("ROE", roe, roe_src, "roe", "{:.1%}", color_logic=lambda x: "green" if x>0.15 else "yellow")
 
                 st.write("")
                 x1, x2, x3, x4 = st.columns(4)
-                with x1:
-                    c = "🟢" if dy and dy>0.03 else ("🔵" if dy and dy>0.015 else "⚪")
-                    st.metric("Dividend", f"{c} {dy:.2%}" if dy else "0%")
-                with x2:
-                    c = "🟢" if rsi_val<30 else "⚪"
-                    st.metric("RSI (14)", f"{c} {rsi_val:.0f}")
-                with x3:
-                    c = "🟢" if beta and beta<0.8 else ("🟠" if beta and beta>1.5 else "⚪")
-                    st.metric("Beta", f"{c} {beta:.2f}" if beta else "1.0")
-                with x4:
-                    c = "🟢" if marg and marg>0.2 else ("🔵" if marg and marg>0.1 else "🟠")
-                    st.metric("Winstmarge", f"{c} {marg:.1%}" if marg else "N/A")
+                with x1: disp_metric("Dividend", dy, dy_src, "div", "{:.2%}", color_logic=lambda x: "green" if x>0.03 else ("blue" if x>0.015 else "white"))
+                with x2: disp_metric("RSI (14)", rsi_val, "Yahoo", "rsi", "{:.0f}", color_logic=lambda x: "green" if x<30 else "white")
+                with x3: disp_metric("Beta", beta, "Yahoo", "beta", "{:.2f}", color_logic=lambda x: "green" if x<0.8 else ("orange" if x>1.5 else "white"))
+                with x4: disp_metric("Winstmarge", marg, "Yahoo", "margin", "{:.1%}", color_logic=lambda x: "green" if x>0.2 else ("blue" if x>0.1 else "orange"))
 
                 st.markdown("### 📈 Koers")
                 fig = go.Figure()
@@ -521,6 +501,7 @@ with tabs[1]:
                 if not dr:
                     dy = safe_get(s.info, 'dividendYield')
                     if dy and p_eur>0: dr = dy * (p_eur/rate)
+                
                 if dr:
                     dy_eur = dr * rate * item['amount']
                     ex = safe_get(s.info, 'exDividendDate')
@@ -547,6 +528,7 @@ with tabs[1]:
         k1.metric("Waarde", f"€ {tot_val:,.2f}")
         k2.metric("Winst/Verlies", f"€ {tres:,.2f}", delta=f"{(tres/tot_inv)*100:.1f}%" if tot_inv>0 else "0%")
         k3.metric("Inleg", f"€ {tot_inv:,.2f}")
+        
         st.divider()
         
         c_sec, c_div = st.columns(2)

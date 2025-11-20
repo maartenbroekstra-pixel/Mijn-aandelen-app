@@ -76,6 +76,12 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 def safe_get(d, k, default=None):
     return d.get(k) if d and d.get(k) is not None else default
 
+def truncate_text(text, max_len=25):
+    """Kort lange namen af voor betere weergave op mobiel"""
+    if text and len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
     try:

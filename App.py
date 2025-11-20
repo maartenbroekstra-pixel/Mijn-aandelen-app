@@ -3,310 +3,352 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
-import numpy as np
-import json
 import requests
+import json
 from datetime import datetime
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Mijn Aandelen App", layout="wide", page_icon="📈")
 
 # --- HULPFUNCTIES ---
 
 @st.cache_data(ttl=3600)
 def get_currency_rate(from_currency, to_currency="EUR"):
+    """Haalt wisselkoers op en cached deze voor 1 uur."""
     if from_currency == to_currency: return 1.0
+    if not from_currency or from_currency == 'nan': return 1.0
+    
     try:
-        if from_currency == "USD" and to_currency == "EUR": ticker = "EUR=X"
-        elif from_currency == "GBP" and to_currency == "EUR": ticker = "EURGBP=X"
-        else: ticker = f"{from_currency}{to_currency}=X"
+        # Yahoo tickers voor wisselkoersen
+        ticker_map = {
+            "USD": "EUR=X",
+            "GBP": "EURGBP=X",
+            "CNY": "CNYEUR=X",
+            "HKD": "HKDEUR=X"
+        }
+        ticker = ticker_map.get(from_currency, f"{from_currency}{to_currency}=X")
         data = yf.Ticker(ticker).history(period="1d")
-        if not data.empty: return data['Close'].iloc[-1]
+        
+        if not data.empty:
+            return data['Close'].iloc[-1]
+        return 1.0 # Fallback
+    except:
         return 1.0
-    except: return 1.0
-
-def calculate_rsi(data, window=14):
-    if data.empty: return 50
-    delta = data['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50)
 
 def safe_get(info_dict, key, default=None):
+    """Haal waarde veilig op uit dictionary."""
+    if not info_dict: return default
     val = info_dict.get(key)
     return val if val is not None else default
 
-# --- NIEUWE FUNCTIE: ZOEKEN OP NAAM ---
 def search_yahoo(query):
-    """Zoekt tickers op basis van naam via Yahoo API"""
+    """Zoekt op bedrijfsnaam en geeft tickers terug."""
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=US&quotesCount=6&newsCount=0"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get(url, headers=headers)
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=US&quotesCount=5"
+        r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         
         results = []
         if 'quotes' in data:
-            for quote in data['quotes']:
-                symbol = quote.get('symbol')
-                name = quote.get('shortname', quote.get('longname', symbol))
-                exchange = quote.get('exchange', 'N/A')
-                # Filter optioneel: zet Xetra/Amsterdam bovenaan in je hoofd
-                results.append(f"{symbol} | {name} ({exchange})")
+            for q in data['quotes']:
+                symbol = q.get('symbol')
+                name = q.get('shortname', q.get('longname', symbol))
+                exch = q.get('exchange', 'N/A')
+                # Filter optie: sluit indices uit als je wilt
+                results.append(f"{symbol} | {name} ({exch})")
         return results
     except:
         return []
 
-# --- DATA MANAGEMENT ---
-if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
+# --- PORTFOLIO FUNCTIES ---
+if 'portfolio' not in st.session_state:
+    st.session_state['portfolio'] = []
 
-def save_portfolio(): return json.dumps(st.session_state['portfolio'])
-def load_portfolio(uploaded_file):
-    if uploaded_file is not None:
+def save_portfolio_json():
+    return json.dumps(st.session_state['portfolio'])
+
+def load_portfolio_json(uploaded_file):
+    if uploaded_file:
         try:
-            data = json.load(uploaded_file)
-            st.session_state['portfolio'] = data
-            st.success("Portfolio geladen!")
-        except: st.error("Fout bij laden.")
+            st.session_state['portfolio'] = json.load(uploaded_file)
+            st.success("✅ Portfolio geladen!")
+        except:
+            st.error("❌ Kon bestand niet lezen.")
 
-# --- ZIJBALK ---
-st.sidebar.title("💼 Portfolio Manager")
+# --- ZIJBALK: ALLEEN BESTANDSBEHEER ---
+st.sidebar.header("💾 Data Opslag")
+st.sidebar.caption("Streamlit onthoudt niks na afsluiten. Download je data hier:")
 
-with st.sidebar.expander("➕ Aandeel Toevoegen", expanded=False):
-    st.write("Zoek eerst het aandeel:")
-    search_query_port = st.text_input("Naam of Ticker", key="search_port")
-    
-    selected_ticker_port = None
-    if search_query_port:
-        results = search_yahoo(search_query_port)
-        if results:
-            selection = st.selectbox("Kies aandeel:", results, key="select_port")
-            selected_ticker_port = selection.split(" | ")[0] # Pak alleen ticker deel
-        else:
-            st.warning("Geen resultaten.")
-    
-    with st.form("add_stock_form"):
-        st.caption(f"Geselecteerd: {selected_ticker_port if selected_ticker_port else '...'}")
-        new_amount = st.number_input("Aantal stuks", min_value=0.0, value=1.0, step=0.1)
-        new_price = st.number_input("GAK (in €)", min_value=0.0, value=50.0, step=0.1)
-        
-        submitted = st.form_submit_button("Toevoegen")
-        if submitted and selected_ticker_port:
-            st.session_state['portfolio'].append({
-                "ticker": selected_ticker_port,
-                "amount": new_amount,
-                "avg_price_eur": new_price
-            })
-            st.success(f"{selected_ticker_port} toegevoegd!")
-            st.rerun()
+json_data = save_portfolio_json()
+st.sidebar.download_button("⬇️ Download Portfolio", json_data, "portfolio.json", "application/json")
+
+uploaded_file = st.sidebar.file_uploader("⬆️ Upload Portfolio", type=['json'])
+if uploaded_file:
+    load_portfolio_json(uploaded_file)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("💾 Backup")
-json_data = save_portfolio()
-st.sidebar.download_button("Download JSON", json_data, "mijn_portfolio.json", "application/json")
-uploaded_file = st.sidebar.file_uploader("Upload JSON", type=['json'])
-if uploaded_file: load_portfolio(uploaded_file)
+st.sidebar.info("💡 **Tip:** Zoek aandelen in het hoofdscherm. Daar kun je ze analyseren én direct toevoegen.")
 
 # --- HOOFD NAVIGATIE ---
-mode = st.radio("", ["🔎 Analyse & Nieuws", "📊 Mijn Portfolio"], horizontal=True)
+tabs = st.tabs(["🔎 Analyse & Toevoegen", "📊 Mijn Portfolio Overzicht"])
 
 # ==================================================
-# 🔎 MODULE: ANALYSE
+# TAB 1: ANALYSE & TOEVOEGEN
 # ==================================================
-if mode == "🔎 Analyse & Nieuws":
+with tabs[0]:
     col_search, col_period = st.columns([3, 1])
     
     with col_search:
-        # --- NIEUWE ZOEKBALK ---
-        search_text = st.text_input("Zoek Bedrijf:", placeholder="Typ naam (bv. Siemens, Shell, Nvidia)...")
+        search_text = st.text_input("🔍 Zoek Aandeel (Naam of Ticker):", placeholder="Bijv. JD.com, Shell, Volkswagen...")
         
-        final_ticker = None
+        selected_ticker = None
         if search_text:
-            search_results = search_yahoo(search_text)
-            if search_results:
-                # Laat gebruiker kiezen uit resultaten
-                selected_item = st.selectbox("Selecteer het juiste aandeel:", search_results)
-                final_ticker = selected_item.split(" | ")[0] # Haal ticker eruit
+            results = search_yahoo(search_text)
+            if results:
+                choice = st.selectbox("Selecteer het juiste bedrijf:", results)
+                selected_ticker = choice.split(" | ")[0]
             else:
-                st.warning("Geen aandelen gevonden met deze naam.")
-
+                st.warning("Geen resultaten gevonden. Probeer de exacte ticker.")
+    
     with col_period:
-        period = st.selectbox("Grafiek Periode", ["1mo", "3mo", "6mo", "1y", "5y", "max"], index=3)
+        period = st.selectbox("Grafiek:", ["1mo", "6mo", "1y", "3y", "5y"], index=2)
 
-    if final_ticker:
+    # --- DATA OPHALEN ---
+    if selected_ticker:
         try:
-            stock = yf.Ticker(final_ticker)
+            stock = yf.Ticker(selected_ticker)
             info = stock.info
             hist = stock.history(period=period)
             
             if hist.empty:
-                st.error(f"Geen data voor {final_ticker}.")
+                st.error("Geen data beschikbaar voor deze ticker.")
             else:
-                # Valuta
-                curr = safe_get(info, 'currency', 'EUR')
-                eur_rate = get_currency_rate(curr, "EUR")
-                
-                price_eur = hist['Close'].iloc[-1] * eur_rate
-                
-                # Header
+                # Valuta Check
+                currency = safe_get(info, 'currency', 'EUR')
+                eur_rate = get_currency_rate(currency, "EUR")
+                current_price_orig = hist['Close'].iloc[-1]
+                current_price_eur = current_price_orig * eur_rate
+
+                # --- HEADER ---
                 st.markdown("---")
-                c1, c2 = st.columns([3, 1])
+                c1, c2, c3 = st.columns([2, 1, 1])
                 with c1:
-                    st.title(safe_get(info, 'shortName', final_ticker))
-                    st.caption(f"Ticker: {final_ticker} | Sector: {safe_get(info, 'sector', '-')} | Beurs: {safe_get(info, 'exchange', '-')}")
+                    st.title(safe_get(info, 'shortName', selected_ticker))
+                    st.caption(f"Ticker: {selected_ticker} | Beurs: {safe_get(info, 'exchange', '-')}")
                 with c2:
-                    st.metric("Koers (in €)", f"€ {price_eur:.2f}")
+                    st.metric("Huidige Koers (EUR)", f"€ {current_price_eur:.2f}")
+                with c3:
+                    # KNOP: TOEVOEGEN AAN PORTFOLIO (Hier direct in beeld!)
+                    with st.popover("➕ Voeg toe aan Portfolio"):
+                        with st.form("add_form"):
+                            st.write(f"**{selected_ticker} toevoegen**")
+                            amount = st.number_input("Aantal stuks", min_value=0.0, value=1.0)
+                            price_inp = st.number_input("Jouw GAK (in Euro's!)", min_value=0.0, value=float(round(current_price_eur, 2)))
+                            if st.form_submit_button("Bevestig"):
+                                st.session_state['portfolio'].append({
+                                    "ticker": selected_ticker,
+                                    "amount": amount,
+                                    "avg_price_eur": price_inp
+                                })
+                                st.toast(f"{selected_ticker} toegevoegd!", icon="✅")
 
-                # Metrics berekenen
-                peg = safe_get(info, 'pegRatio')
+                # --- METRICS BEREKENEN ---
+                # PEG fix: als yfinance niks geeft, zelf proberen (P/E gedeeld door Growth)
                 pe = safe_get(info, 'trailingPE')
-                growth = safe_get(info, 'earningsGrowth')
-                if peg is None and pe and growth: peg = pe / (growth * 100)
+                fwd_pe = safe_get(info, 'forwardPE')
+                growth = safe_get(info, 'earningsGrowth') # bv 0.15 voor 15%
+                peg = safe_get(info, 'pegRatio')
                 
-                div_yield = safe_get(info, 'dividendYield', 0.0)
-                if div_yield is None: div_yield = 0.0
+                if peg is None and pe and growth:
+                    peg = pe / (growth * 100)
+                
+                pb = safe_get(info, 'priceToBook')
+                div = safe_get(info, 'dividendYield')
+                if div is None: div = 0.0
+                
+                de = safe_get(info, 'debtToEquity')
+                de_ratio = de / 100 if de else None
 
-                rsi_val = calculate_rsi(hist).iloc[-1]
-                pb = safe_get(info, 'priceToBook', 0)
-                de = safe_get(info, 'debtToEquity', 0) / 100
+                # RSI (Handmatig)
+                delta = hist['Close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                rs = gain / loss
+                rsi = 100 - (100 / (1 + rs))
+                rsi_val = rsi.iloc[-1] if not rsi.empty else 50
 
-                # Metrics Tonen
-                st.subheader("Fundamentele Analyse")
-                m1, m2, m3, m4 = st.columns(4)
+                # --- METRICS DASHBOARD ---
+                st.subheader("📊 Fundamentele Cijfers")
+                
+                m1, m2, m3, m4, m5 = st.columns(5)
                 
                 with m1:
+                    # PEG Logic
                     val = peg if peg else 0
-                    color = "🟢" if 0 < val < 1 else ("🟡" if val < 2 else ("⚪" if val == 0 else "🟠"))
-                    st.metric("PEG Ratio", f"{color} {val:.2f}", help="<1 is goedkoop t.o.v. groei")
+                    color = "🟢" if 0 < val < 1 else ("🟠" if val < 0 else ("🟡" if val < 2 else "🔴"))
+                    st.metric("PEG Ratio", f"{color} {val:.2f}" if peg else "N/A", help="Negatief = Krimpende winst. 0-1 = Ondergewaardeerd.")
                 
                 with m2:
-                    roe = safe_get(info, 'returnOnEquity', 0)
-                    color = "🟢" if roe > 0.15 else ("🟡" if roe > 0.10 else "🔴")
-                    st.metric("ROE", f"{color} {roe:.1%}", help="Winstgevendheid. >15% is sterk.")
+                    # Forward PE Logic
+                    val = fwd_pe if fwd_pe else 0
+                    color = "🟢" if 0 < val < 15 else "🟡"
+                    st.metric("Forward P/E", f"{color} {val:.1f}" if fwd_pe else "N/A", help="Verwachte K/W voor komend jaar.")
 
                 with m3:
-                    color = "🟢" if pb < 1.5 and pb > 0 else "⚪"
-                    st.metric("P/B Ratio", f"{color} {pb:.2f}", help="Koers / Boekwaarde")
-
+                    val = roe = safe_get(info, 'returnOnEquity', 0)
+                    color = "🟢" if roe > 0.15 else ("🟡" if roe > 0.10 else "🔴")
+                    st.metric("ROE", f"{color} {roe:.1%}", help="Return on Equity. >15% is sterk.")
+                
                 with m4:
-                    color = "🟢" if rsi_val < 30 else ("🔴" if rsi_val > 70 else "⚪")
-                    st.metric("RSI (14)", f"{color} {rsi_val:.0f}", help="Timing indicator")
-
-                m5, m6, m7, m8 = st.columns(4)
+                    # Debt Logic
+                    val = de_ratio if de_ratio else 0
+                    color = "🟢" if val < 1.0 else "🟠"
+                    st.metric("Debt/Equity", f"{color} {val:.2f}" if de_ratio else "N/A", help="< 1.0 is gezond.")
+                
                 with m5:
-                    color = "🟢" if de < 1.0 else "🟠"
-                    st.metric("Schuld/Eigen Verm.", f"{color} {de:.2f}")
-                with m6:
-                    beta = safe_get(info, 'beta')
-                    st.metric("Beta", f"{beta:.2f}" if beta else "1.0")
-                with m7:
-                    st.metric("Dividend", f"{div_yield:.2%}")
-                with m8:
-                    target = safe_get(info, 'targetMeanPrice')
-                    t_eur = f"€ {target * eur_rate:.2f}" if target else "N/A"
-                    st.metric("Koersdoel", t_eur)
+                    # RSI Logic
+                    val = rsi_val
+                    color = "🟢" if val < 30 else ("🔴" if val > 70 else "⚪")
+                    st.metric("RSI (Timing)", f"{color} {val:.0f}", help="<30 Oversold (Koopkans?), >70 Overbought.")
 
-                # Grafiek
+                # --- GRAFIEK ---
                 st.markdown("### 📈 Koersverloop")
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', name='Koers', line=dict(color='#00CC96')))
-                fig.update_layout(height=400, template="plotly_dark", margin=dict(l=0, r=0, t=30, b=0), yaxis_title=f"Prijs ({curr})")
+                color_line = '#00C805' if hist['Close'].iloc[-1] >= hist['Close'].iloc[0] else '#FF5000'
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', name=selected_ticker, line=dict(color=color_line)))
+                fig.update_layout(template="plotly_dark", margin=dict(l=0,r=0,t=10,b=0), height=400, yaxis_title=currency)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # Nieuws
-                st.markdown("### 📰 Nieuws")
-                news = stock.news
-                if news:
-                    for n in news[:5]:
-                        st.markdown(f"**{n.get('title')}**")
-                        st.caption(f"{n.get('publisher')} - [Lees Artikel]({n.get('link')})")
-                        st.divider()
+                # --- NIEUWS (Fallback Methode) ---
+                st.markdown("### 📰 Laatste Nieuws")
+                news_items = getattr(stock, 'news', [])
+                
+                if news_items:
+                    for n in news_items[:3]:
+                        title = n.get('title', 'Geen titel')
+                        link = n.get('link')
+                        pub = n.get('publisher', 'Onbekend')
+                        if link:
+                            st.markdown(f"**[{title}]({link})**")
+                            st.caption(f"Bron: {pub}")
+                            st.markdown("---")
                 else:
-                    st.info("Geen nieuws gevonden.")
+                    # Fallback knop als yfinance faalt
+                    st.info("Geen direct nieuws geladen via de API.")
+                    search_url = f"https://finance.yahoo.com/quote/{selected_ticker}/news"
+                    st.markdown(f"[👉 Klik hier voor het laatste nieuws op Yahoo Finance]({search_url})")
 
         except Exception as e:
-            st.error(f"Error: {e}")
+            st.error(f"Er ging iets mis bij het ophalen van data: {e}")
+
 
 # ==================================================
-# 📊 MODULE: PORTFOLIO
+# TAB 2: PORTFOLIO
 # ==================================================
-elif mode == "📊 Mijn Portfolio":
-    st.title("Mijn Aandelen (in Euro)")
+with tabs[1]:
+    st.title("Mijn Aandelen")
     
     if not st.session_state['portfolio']:
-        st.info("Je portfolio is leeg. Voeg aandelen toe via de zijbalk.")
+        st.info("Je portfolio is leeg. Ga naar het tabblad 'Analyse & Toevoegen' om aandelen te zoeken en toe te voegen!")
     else:
-        rows = []
-        total_inv = 0
-        total_val = 0
-        sectors = {}
-        
+        portfolio_rows = []
+        total_invested = 0
+        total_value = 0
+        sector_dist = {}
+
+        # Laadbaalkje tonen
         bar = st.progress(0)
+        total_items = len(st.session_state['portfolio'])
+
         for i, item in enumerate(st.session_state['portfolio']):
             ticker = item['ticker']
             amt = item['amount']
             gak = item['avg_price_eur']
             
             try:
+                # Live data
                 s = yf.Ticker(ticker)
-                h = s.history(period="1d")
-                if not h.empty:
-                    curr_orig = h['Close'].iloc[-1]
+                # Snelste manier: pak 'fast_info' of laatste history
+                price_data = s.history(period="1d")
+                
+                if not price_data.empty:
+                    current_raw = price_data['Close'].iloc[-1]
                     inf = s.info
-                    rate = get_currency_rate(safe_get(inf, 'currency', 'EUR'), "EUR")
                     
-                    curr_eur = curr_orig * rate
-                    val_eur = curr_eur * amt
+                    # Valuta conversie
+                    cur_code = safe_get(inf, 'currency', 'EUR')
+                    rate = get_currency_rate(cur_code, "EUR")
+                    current_eur = current_raw * rate
+                    
+                    # Berekeningen
+                    val_eur = current_eur * amt
                     cost_eur = gak * amt
+                    profit_eur = val_eur - cost_eur
+                    profit_pct = (profit_eur / cost_eur) * 100 if cost_eur > 0 else 0
                     
-                    sec = safe_get(inf, 'sector', 'Overig')
-                    sectors[sec] = sectors.get(sec, 0) + val_eur
+                    sec = safe_get(inf, 'sector', 'Onbekend')
+                    sector_dist[sec] = sector_dist.get(sec, 0) + val_eur
                     
-                    rows.append({
+                    portfolio_rows.append({
                         "Ticker": ticker,
                         "Bedrijf": safe_get(inf, 'shortName', ticker),
                         "Aantal": amt,
                         "GAK (€)": gak,
-                        "Koers (€)": curr_eur,
+                        "Koers (€)": current_eur,
                         "Waarde (€)": val_eur,
-                        "W/V (€)": val_eur - cost_eur,
-                        "Rend (%)": ((val_eur - cost_eur)/cost_eur)*100
+                        "Winst (€)": profit_eur,
+                        "Rendement (%)": profit_pct
                     })
-                    total_inv += cost_eur
-                    total_val += val_eur
-            except: pass
-            bar.progress((i+1)/len(st.session_state['portfolio']))
+                    
+                    total_value += val_eur
+                    total_invested += cost_eur
+            
+            except:
+                st.warning(f"Kon data voor {ticker} niet updaten.")
+            
+            bar.progress((i + 1) / total_items)
+        
         bar.empty()
 
-        # Totalen
-        res_eur = total_val - total_inv
-        res_pct = (res_eur/total_inv)*100 if total_inv > 0 else 0
+        # --- TOTALEN ---
+        tot_res_eur = total_value - total_invested
+        tot_res_pct = (tot_res_eur / total_invested) * 100 if total_invested > 0 else 0
         
         k1, k2, k3 = st.columns(3)
-        k1.metric("Waarde", f"€ {total_val:,.2f}")
-        k2.metric("Resultaat", f"€ {res_eur:,.2f}", delta=f"{res_pct:.2f}%")
-        k3.metric("Geïnvesteerd", f"€ {total_inv:,.2f}")
+        k1.metric("Totale Waarde", f"€ {total_value:,.2f}")
+        k2.metric("Totaal Resultaat", f"€ {tot_res_eur:,.2f}", delta=f"{tot_res_pct:.1f}%")
+        k3.metric("Geïnvesteerd", f"€ {total_invested:,.2f}")
         
         st.divider()
         
+        # --- TABEL & GRAFIEK ---
         c1, c2 = st.columns([1, 2])
+        
         with c1:
-            if sectors:
-                fig = px.pie(values=list(sectors.values()), names=list(sectors.keys()), hole=0.4)
-                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=300)
+            if sector_dist:
+                st.subheader("Sectoren")
+                fig = px.pie(values=list(sector_dist.values()), names=list(sector_dist.keys()), hole=0.4)
+                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=250)
                 st.plotly_chart(fig, use_container_width=True)
+        
         with c2:
-            if rows:
-                df = pd.DataFrame(rows)
-                st.dataframe(df, use_container_width=True, hide_index=True, column_config={
-                    "Rend (%)": st.column_config.NumberColumn(format="%.1f%%"),
-                    "Koers (€)": st.column_config.NumberColumn(format="€ %.2f"),
-                    "GAK (€)": st.column_config.NumberColumn(format="€ %.2f"),
-                    "Waarde (€)": st.column_config.NumberColumn(format="€ %.2f"),
-                    "W/V (€)": st.column_config.NumberColumn(format="€ %.2f")
-                })
-                if st.button("Alles Wissen"):
+            st.subheader("Details")
+            if portfolio_rows:
+                df = pd.DataFrame(portfolio_rows)
+                st.dataframe(
+                    df, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Koers (€)": st.column_config.NumberColumn(format="€ %.2f"),
+                        "GAK (€)": st.column_config.NumberColumn(format="€ %.2f"),
+                        "Waarde (€)": st.column_config.NumberColumn(format="€ %.2f"),
+                        "Winst (€)": st.column_config.NumberColumn(format="€ %.2f"),
+                        "Rendement (%)": st.column_config.NumberColumn(format="%.1f%%")
+                    }
+                )
+                
+                if st.button("🗑️ Portfolio Wissen"):
                     st.session_state['portfolio'] = []
                     st.rerun()

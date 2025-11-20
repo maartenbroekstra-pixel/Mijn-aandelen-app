@@ -48,11 +48,12 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     try:
         ticker = f"{from_curr}{to_curr}=X"
         if from_curr == "USD" and to_curr == "EUR": ticker = "EUR=X"
+        
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
             # Sanity check: USD->EUR is ong 0.95. Als > 1.05 is het wss omgekeerd.
-            if from_curr == "USD" and to_curr == "EUR" and rate > 1.05: return 1/rate
+            if from_curr == "USD" and to_curr == "EUR" and rate > 1.02: return 1/rate
             return rate
         return 0.95 if from_curr == "USD" else 1.0
     except: return 1.0
@@ -180,53 +181,29 @@ def calculate_score(m):
 
     return (score/total)*10 if total>0 else 5.0, opps, risks, neut
 
-# --- DATA MANAGER (CALLBACK LOGIC FIX) ---
+# --- DATA BEHEER ---
 def load_file_callback():
-    """Wordt alleen aangeroepen bij file change"""
     uploaded_file = st.session_state.get('file_loader')
     if uploaded_file is not None:
         try:
             uploaded_file.seek(0)
             data = json.load(uploaded_file)
-            
-            if isinstance(data, list):
-                st.session_state['portfolio'] = data
+            if isinstance(data, list): st.session_state['portfolio'] = data
             elif isinstance(data, dict):
                 st.session_state['portfolio'] = data.get('portfolio', [])
                 st.session_state['wishlist'] = data.get('wishlist', [])
-            
             st.toast("✅ Data succesvol ingeladen!", icon="💾")
-        except Exception as e:
-            st.error(f"Fout: {e}")
+        except Exception as e: st.error(f"Fout: {e}")
 
 def get_json_data():
-    return json.dumps({
-        'portfolio': st.session_state['portfolio'],
-        'wishlist': st.session_state['wishlist']
-    })
+    return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data")
-
-st.sidebar.download_button(
-    f"⬇️ Download ({len(st.session_state['portfolio'])} port / {len(st.session_state['wishlist'])} wish)",
-    get_json_data(),
-    "aandelen.json",
-    "application/json"
-)
-
-# Upload met callback
-st.sidebar.file_uploader(
-    "⬆️ Upload", 
-    type=['json'], 
-    key='file_loader', 
-    on_change=load_file_callback
-)
-
+st.sidebar.download_button(f"⬇️ Download ({len(st.session_state['portfolio'])} port / {len(st.session_state['wishlist'])} wish)", get_json_data(), "aandelen.json", "application/json")
+st.sidebar.file_uploader("⬆️ Upload", type=['json'], key='file_loader', on_change=load_file_callback)
 st.sidebar.divider()
-if st.sidebar.button("🗑️ Reset Cache"):
-    st.cache_data.clear()
-    st.rerun()
+if st.sidebar.button("🗑️ Reset Cache"): st.cache_data.clear(); st.rerun()
 
 # --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
@@ -265,10 +242,8 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # SMART DATA
                 mt = sel_ticker
                 mi = info
-                
                 if sel_ticker in EU_TO_US_MAP:
                     mt = EU_TO_US_MAP[sel_ticker]
                     mi = yf.Ticker(mt).info
@@ -298,11 +273,9 @@ with tabs[0]:
                     if p and g and g>0: return p/(g*100)
                     return None
                 
-                # Metrics
                 peg, peg_src = get_m('pegRatio', 'peg', 'peg', c_peg)
                 fwd_pe, fwd_src = get_m('forwardPE', 'fwd_pe', 'fwd_pe')
                 pb, pb_src = get_m('priceToBook', 'pb')
-                
                 tgt, tgt_src = get_m('targetMeanPrice', 'target')
                 tgt_eur, upside = None, ""
                 if tgt:
@@ -335,7 +308,6 @@ with tabs[0]:
                 rsi = 100 - (100/(1+rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
 
-                # UI
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     st.title(truncate_text(safe_get(info, 'shortName', sel_ticker)))
@@ -359,7 +331,6 @@ with tabs[0]:
                                 st.toast("Opgeslagen!", icon="❤️")
                                 st.rerun()
 
-                # SCORE
                 md = {'peg': peg, 'fwd_pe': fwd_pe, 'roe': roe, 'de': de, 'cr': cr, 'pb': pb}
                 score, opps, risks, neut = calculate_score(md)
 
@@ -382,7 +353,6 @@ with tabs[0]:
 
                 st.divider()
                 st.subheader("📊 Ratio's")
-                
                 def dm(l, v, s, k, fmt="{:.2f}", cl=None):
                     tt = f"**Bron:** {s}\n\n{TOOLTIPS.get(k,'')}"
                     if v is None: st.metric(l, "N/A", help=tt); return
@@ -433,13 +403,14 @@ with tabs[0]:
 # ==================================================
 with tabs[1]:
     st.title("Portfolio")
+    # INIT total_val VOORAF om crash te voorkomen
+    total_val = 0
+    total_inv = 0
+    
     if st.session_state['portfolio']:
         rows = []
         sec_dist = {}
         div_cal = []
-        
-        total_val = 0
-        total_inv = 0
         
         bar = st.progress(0)
         items = st.session_state['portfolio']
@@ -448,9 +419,6 @@ with tabs[1]:
                 t = item['ticker']
                 s = yf.Ticker(t)
                 h = s.history(period="1d")
-                
-                p_eur = 0
-                rate = 1.0
                 
                 if not h.empty:
                     raw = h['Close'].iloc[-1]
@@ -519,8 +487,32 @@ with tabs[1]:
         if st.button("Alles Wissen"):
             st.session_state['portfolio'] = []
             st.rerun()
-            
-    else: st.info("Geen data.")
+    else: 
+        st.info("Geen data.")
+        # Zorg dat total_val 0 is als er geen portfolio is (voor de calc)
+        total_val = 0
+
+    # --- CALCULATOR (ALTIJD ZICHTBAAR) ---
+    st.divider()
+    with st.expander("🧮 Rente-op-Rente Planner"):
+        cc1, cc2, cc3, cc4 = st.columns(4)
+        sv = cc1.number_input("Start (€)", value=float(round(total_val, 0)), step=100.0)
+        mi = cc2.number_input("Mnd Inleg (€)", min_value=0, value=500, step=50)
+        jr = cc3.number_input("Jaren", min_value=1, value=20, step=1)
+        rr = cc4.number_input("Rendement (%)", min_value=0.0, value=7.0, step=0.1)
+        
+        mths = np.arange(jr*12+1)
+        mr = rr/100/12
+        fut, inv = [sv], [sv]
+        c, ci = sv, sv
+        for _ in range(len(mths)-1):
+            c = (c+mi)*(1+mr)
+            ci += mi
+            fut.append(c)
+            inv.append(ci)
+        st.metric(f"Na {jr} jaar", f"€ {fut[-1]:,.0f}", delta=f"Winst: € {fut[-1]-inv[-1]:,.0f}")
+        df_c = pd.DataFrame({"Maand": mths, "Waarde": fut, "Inleg": inv})
+        st.plotly_chart(px.line(df_c, x="Maand", y=["Waarde", "Inleg"]), use_container_width=True)
 
 # ==================================================
 # 3. WISHLIST

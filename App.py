@@ -29,16 +29,13 @@ def get_currency_rate(from_currency, to_currency="EUR"):
     if from_currency == to_currency: return 1.0
     if not from_currency or from_currency == 'nan': return 1.0
     try:
-        # Slimme check voor USD/EUR richting
         ticker = "EUR=X" if from_currency == "USD" and to_currency == "EUR" else f"{from_currency}{to_currency}=X"
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
-            # Sanity check: USD->EUR moet < 1.0 zijn. Als > 1.05 is het wss andersom.
             if from_currency == "USD" and to_currency == "EUR" and rate > 1.05:
                 return 1 / rate
             return rate
-        # Fallback
         if from_currency == "USD": return 0.95
         return 1.0
     except: return 1.0
@@ -86,13 +83,11 @@ def search_yahoo(query):
         results = []
         if 'quotes' in data:
             quotes = data['quotes']
-            # Sorteer Xetra (.DE/.F) bovenaan
             def sort_key(q):
                 sym = q.get('symbol', '')
                 if sym.endswith('.DE') or sym.endswith('.F'): return 0
                 return 1
             quotes.sort(key=sort_key)
-            
             for q in quotes:
                 symbol = q.get('symbol')
                 name = q.get('shortname', q.get('longname', symbol))
@@ -105,9 +100,11 @@ def search_yahoo(query):
 def find_primary_ticker(company_name):
     """Zoekt de Amerikaanse hoofdnotering op basis van naam"""
     try:
-        # We zoeken in US regio
+        # Schoon de naam op voor betere search (bv "PayPal Holdings Inc" -> "PayPal")
+        clean_name = re.sub(r' (Inc|Corp|AG|SE|PLC|Ltd|GmbH)\.?$', '', company_name, flags=re.IGNORECASE).strip()
+        
         headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={company_name}&lang=en-US&region=US&quotesCount=1"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_name}&lang=en-US&region=US&quotesCount=1"
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         if 'quotes' in data and len(data['quotes']) > 0:
@@ -249,7 +246,7 @@ with tabs[0]:
 
     if sel_ticker:
         try:
-            # 1. Haal data van geselecteerd aandeel (voor Prijs & Valuta)
+            # 1. BASIS DATA (Geselecteerde ticker)
             stock = yf.Ticker(sel_ticker)
             info = stock.info
             hist = stock.history(period=per)
@@ -257,32 +254,35 @@ with tabs[0]:
             if hist.empty:
                 st.error("Geen data. Probeer een andere ticker.")
             else:
-                # Prijs & Valuta van de KEUZE (bv Euro)
                 curr = safe_get(info, 'currency', 'EUR')
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # 2. SMART DATA FETCH: Check of we metrics missen
-                # Als PEG, MarketCap of TrailingPE ontbreken, zoek de US parent.
+                # 2. SMART DATA MERGE
+                # Check of kritieke data mist in de huidige ticker (bv 2PP.DE)
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                if not safe_get(info, 'marketCap') or not safe_get(info, 'trailingPE'):
-                    # Probeer US ticker te vinden op basis van naam
-                    short_name = safe_get(info, 'shortName', '').split(' ')[0] # Pak eerste woord bv "PayPal"
+                # Lijst met 'must-have' metrics om US search te triggeren
+                check_keys = ['forwardPE', 'pegRatio', 'targetMeanPrice', 'trailingPE']
+                missing_data = any(safe_get(info, k) is None for k in check_keys)
+                
+                if missing_data:
+                    # Zoek US parent
+                    short_name = safe_get(info, 'shortName', '')
                     us_ticker = find_primary_ticker(short_name)
                     
                     if us_ticker and us_ticker != sel_ticker:
-                        # Haal rijke data op van US ticker
+                        # Haal US data op
                         us_stock = yf.Ticker(us_ticker)
                         metrics_info = us_stock.info
                         metrics_ticker = us_ticker
-                        # st.toast(f"Data verrijkt via primaire notering: {us_ticker}", icon="ℹ️")
+                        # st.toast(f"Data verrijkt via: {us_ticker}", icon="🇺🇸")
 
-                # Finviz pakken we altijd van de metrics_ticker (vaak de US versie)
+                # Finviz altijd van de 'rijkste' ticker (meestal US)
                 fin = get_finviz_data(metrics_ticker)
 
-                # METRICS VERZAMELEN (Uit de rijkste bron)
+                # 3. METRICS SAMENSTELLEN
                 pe = safe_get(metrics_info, 'trailingPE')
                 fwd_pe = safe_get(metrics_info, 'forwardPE')
                 if fwd_pe is None: fwd_pe = fin.get('fwd_pe')
@@ -295,13 +295,11 @@ with tabs[0]:
                     g = safe_get(metrics_info, 'earningsGrowth')
                     if base_pe and g: peg = base_pe/(g*100); peg_src = "Schatting"
 
-                # Dividend (Speciaal geval: Yield is universeel, Rate is valuta-afhankelijk)
                 dy = safe_get(metrics_info, 'dividendYield')
                 if dy is None:
                     dr = safe_get(metrics_info, 'dividendRate')
-                    # Als we rate hebben van US ticker, moeten we die omrekenen naar yield
+                    # Yield berekenen obv prijs van de metrics-ticker (anders klopt ratio niet)
                     if dr: 
-                        # Haal prijs van metrics ticker op om yield te berekenen
                         try: 
                             mp = yf.Ticker(metrics_ticker).history(period="1d")['Close'].iloc[-1]
                             dy = dr / mp
@@ -318,7 +316,7 @@ with tabs[0]:
                 beta = safe_get(metrics_info, 'beta')
                 marg = safe_get(metrics_info, 'profitMargins')
                 
-                # RSI (Altijd op basis van geselecteerde grafiek)
+                # RSI altijd op basis van de grafiek die je ziet (de Euro koers)
                 delta = hist['Close'].diff()
                 gain = (delta.where(delta>0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta<0, 0)).rolling(14).mean()
@@ -326,25 +324,24 @@ with tabs[0]:
                 rsi = 100 - (100/(1+rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
                 
-                # Koersdoel (Uit metrics info, maar valuta converten)
+                # Koersdoel (Let op valuta!)
                 tgt = safe_get(metrics_info, 'targetMeanPrice')
                 if tgt is None: tgt = fin.get('target')
                 
-                # Let op: Target is in valuta van metrics_ticker (vaak USD).
-                # We moeten weten wat die valuta is.
+                # Valuta van het doel bepalen
                 tgt_curr = safe_get(metrics_info, 'currency', 'USD')
                 tgt_rate = get_currency_rate(tgt_curr, "EUR")
                 tgt_eur = tgt * tgt_rate if tgt else None
                 
                 upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%" if tgt_eur else ""
 
-                # --- UI BOUWEN ---
+                # --- UI ---
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     nm = safe_get(info, 'shortName', sel_ticker)
                     st.title(truncate_text(nm))
-                    st.caption(f"{sel_ticker} | {safe_get(info, 'exchange', '-')} | Data via {metrics_ticker}")
+                    st.caption(f"{sel_ticker} | {safe_get(info, 'exchange', '-')} | Data: {metrics_ticker}")
                 with c2: st.metric("Koers", f"€ {price_eur:.2f}")
                 with c3: st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside)
                 with c4:
@@ -550,9 +547,9 @@ with tabs[1]:
         with st.expander("🧮 Rente-op-Rente Planner"):
             cc1, cc2, cc3, cc4 = st.columns(4)
             sv = cc1.number_input("Start (€)", value=float(round(tot_val, 0)), step=100.0)
-            mi = cc2.number_input("Mnd Inleg (€)", value=500, step=50)
-            jr = cc3.number_input("Jaren", value=20, step=1)
-            rr = cc4.number_input("Rendement (%)", value=7.0, step=0.1)
+            mi = cc2.number_input("Mnd Inleg (€)", min_value=0, value=500, step=50)
+            jr = cc3.number_input("Jaren", min_value=1, value=20, step=1)
+            rr = cc4.number_input("Rendement (%)", min_value=0.0, value=7.0, step=0.1)
             
             mths = np.arange(jr*12+1)
             mr = rr/100/12

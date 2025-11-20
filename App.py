@@ -33,7 +33,6 @@ def get_currency_rate(from_currency, to_currency="EUR"):
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
-            # Sanity check
             if from_currency == "USD" and to_currency == "EUR" and rate > 1.05:
                 return 1 / rate
             return rate
@@ -52,7 +51,6 @@ def truncate_text(text, max_len=20):
 
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
-    """Haalt data van Finviz (alleen US tickers)"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
         url = f"https://finviz.com/quote.ashx?t={ticker}"
@@ -86,7 +84,7 @@ def search_yahoo(query):
             quotes = data['quotes']
             def sort_key(q):
                 sym = q.get('symbol', '')
-                if sym.endswith('.DE') or sym.endswith('.F'): return 0
+                if sym.endswith('.DE') or sym.endswith('.F') or sym.endswith('.AS'): return 0
                 return 1
             quotes.sort(key=sort_key)
             for q in quotes:
@@ -99,11 +97,11 @@ def search_yahoo(query):
 
 @st.cache_data(ttl=3600)
 def find_primary_ticker(company_name):
-    """Zoekt agressief naar de US hoofdnotering"""
+    """Zoekt agressief naar de US hoofdnotering (incl ADRs voor Heineken e.d.)"""
     try:
-        # 1. Agressieve schoonmaak van de naam
-        # Split op eerste teken van "rommel"
-        base_name = re.split(r' (Inc|Corp|Corporation|Hldgs|Holdings|Group|Grp|AG|SE|PLC|Ltd|GmbH|S\.A\.|NV|Co\.|DL-|DRc)', company_name, flags=re.IGNORECASE)[0]
+        # 1. Schoonmaak: Haal juridische termen weg
+        # Let op: ook N.V., B.V., A/S etc.
+        base_name = re.split(r' (Inc|Corp|Corporation|Hldgs|Holdings|Group|Grp|AG|SE|PLC|Ltd|GmbH|S\.A\.|NV|N\.V\.|B\.V\.|Co\.|DL-|DRc)', company_name, flags=re.IGNORECASE)[0]
         base_name = base_name.strip()
         
         # 2. Zoeken in US regio
@@ -115,8 +113,10 @@ def find_primary_ticker(company_name):
         if 'quotes' in data:
             for q in data['quotes']:
                 sym = q['symbol']
-                # 3. Filter: Zoek ticker ZONDER punt (dus geen .DE) en niet te lang (geen OTC)
-                if "." not in sym and len(sym) < 6:
+                # 3. Filter: 
+                # - Geen punt (geen .DE, .AS)
+                # - Lengte < 6 (dus wel HEINY of ASML, maar geen lange OTC codes)
+                if "." not in sym and len(sym) <= 5: 
                     return sym
     except: pass
     return None
@@ -219,6 +219,7 @@ def load_data(f):
             st.session_state['portfolio'] = d.get('portfolio', [])
             st.session_state['wishlist'] = d.get('wishlist', [])
         st.success("✅ Data geladen!")
+        st.rerun() # FIX: DIRECT HERLADEN
     except: st.error("Fout bestand.")
 
 # --- SIDEBAR ---
@@ -227,7 +228,7 @@ st.sidebar.download_button("⬇️ Download Alles", save_data(), "aandelen_data.
 up = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
 if up: load_data(up)
 st.sidebar.divider()
-st.sidebar.info("Tip: Xetra/Euro tickers staan bovenaan bij zoeken.")
+st.sidebar.info("Tip: .AS (Amsterdam) en .DE (Xetra) staan bovenaan bij zoeken.")
 
 # --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
@@ -239,14 +240,14 @@ with tabs[0]:
     c_search, c_period = st.columns([3, 1])
     with c_search:
         def_q = st.session_state.get('search_query', "")
-        txt = st.text_input("Zoek Aandeel:", value=def_q, placeholder="Bijv. PayPal, PDD...", key="search")
+        txt = st.text_input("Zoek Aandeel:", value=def_q, placeholder="Bijv. Heineken, ASML...", key="search")
         
         sel_ticker = None
         if txt and "." in txt and " " not in txt: sel_ticker = txt
         elif txt:
             res = search_yahoo(txt)
             if res:
-                ch = st.selectbox("Resultaten (Xetra/Euro prioriteit):", res)
+                ch = st.selectbox("Resultaten (Lokale beurs prioriteit):", res)
                 sel_ticker = ch.split(" | ")[0]
             else: sel_ticker = txt.upper()
             
@@ -255,7 +256,6 @@ with tabs[0]:
 
     if sel_ticker:
         try:
-            # 1. BASIS DATA (Geselecteerde ticker)
             stock = yf.Ticker(sel_ticker)
             info = stock.info
             hist = stock.history(period=per)
@@ -267,32 +267,27 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # 2. SMART DATA MERGE
-                # Check of kritieke data mist in de huidige ticker (bv 2PP.DE)
+                # SMART DATA MERGE (Heineken Fix)
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # Lijst met 'must-have' metrics
+                # Trigger: Als cruciale data mist (PEG, Fwd PE, etc.)
                 check_keys = ['forwardPE', 'pegRatio', 'targetMeanPrice', 'trailingPE']
-                # Als ook maar 1 sleutel mist, zoek de parent
                 missing_data = any(safe_get(info, k) is None for k in check_keys)
                 
                 if missing_data:
-                    # Zoek US parent
                     short_name = safe_get(info, 'shortName', '')
                     us_ticker = find_primary_ticker(short_name)
                     
                     if us_ticker and us_ticker != sel_ticker:
-                        # Haal US data op
                         us_stock = yf.Ticker(us_ticker)
                         metrics_info = us_stock.info
                         metrics_ticker = us_ticker
                         # st.toast(f"Data verrijkt via: {us_ticker}", icon="🇺🇸")
 
-                # Finviz altijd van de 'rijkste' ticker (meestal US)
                 fin = get_finviz_data(metrics_ticker)
 
-                # 3. METRICS SAMENSTELLEN
+                # Metrics
                 pe = safe_get(metrics_info, 'trailingPE')
                 fwd_pe = safe_get(metrics_info, 'forwardPE')
                 if fwd_pe is None: fwd_pe = fin.get('fwd_pe')
@@ -308,7 +303,6 @@ with tabs[0]:
                 dy = safe_get(metrics_info, 'dividendYield')
                 if dy is None:
                     dr = safe_get(metrics_info, 'dividendRate')
-                    # Yield berekenen obv prijs van de metrics-ticker (anders klopt ratio niet)
                     if dr: 
                         try: 
                             mp = yf.Ticker(metrics_ticker).history(period="1d")['Close'].iloc[-1]
@@ -326,7 +320,6 @@ with tabs[0]:
                 beta = safe_get(metrics_info, 'beta')
                 marg = safe_get(metrics_info, 'profitMargins')
                 
-                # RSI altijd op basis van de grafiek die je ziet (de Euro koers)
                 delta = hist['Close'].diff()
                 gain = (delta.where(delta>0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta<0, 0)).rolling(14).mean()
@@ -334,18 +327,15 @@ with tabs[0]:
                 rsi = 100 - (100/(1+rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
                 
-                # Koersdoel (Let op valuta!)
                 tgt = safe_get(metrics_info, 'targetMeanPrice')
                 if tgt is None: tgt = fin.get('target')
                 
-                # Valuta van het doel bepalen
                 tgt_curr = safe_get(metrics_info, 'currency', 'USD')
                 tgt_rate = get_currency_rate(tgt_curr, "EUR")
                 tgt_eur = tgt * tgt_rate if tgt else None
-                
                 upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%" if tgt_eur else ""
 
-                # --- UI ---
+                # UI
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:

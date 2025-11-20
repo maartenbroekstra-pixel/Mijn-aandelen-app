@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import requests
 import json
 import re
@@ -10,13 +11,13 @@ from datetime import datetime
 import numpy as np
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Aandelen Dashboard", layout="wide", page_icon="📈")
 
-# --- STATE ---
+# --- STATE MANAGEMENT ---
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- MAPPING (EU -> US) ---
+# --- MAPPING (EU -> US voor rijkere data) ---
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -41,7 +42,6 @@ TOOLTIPS = {
 }
 
 # --- HULPFUNCTIES ---
-
 @st.cache_data(ttl=3600)
 def get_currency_rate(from_curr, to_curr="EUR"):
     if from_curr == to_curr or not from_curr or from_curr == 'nan': return 1.0
@@ -51,6 +51,7 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
+            # Sanity check: USD->EUR is ong 0.95. Als > 1.05 is het wss omgekeerd.
             if from_curr == "USD" and to_curr == "EUR" and rate > 1.05: return 1/rate
             return rate
         return 0.95 if from_curr == "USD" else 1.0
@@ -63,37 +64,25 @@ def truncate_text(text, max_len=25):
     if text and len(text) > max_len: return text[:max_len] + "..."
     return text
 
-# --- ADVANCED SCRAPERS ---
-
+# --- SCRAPERS ---
 @st.cache_data(ttl=3600)
 def scrape_yahoo_advanced(ticker):
-    """Directe HTML scraper voor als de API faalt"""
     data = {}
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-    
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
-        # 1. Key Statistics Pagina (PEG, Forward PE)
-        url_stats = f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
-        r = requests.get(url_stats, headers=headers, timeout=5)
+        r = requests.get(f"https://finance.yahoo.com/quote/{ticker}/key-statistics", headers=headers, timeout=5)
         if r.status_code == 200:
-            # Zoek patronen in de HTML tekst
-            # Forward P/E
-            m_fwd = re.search(r'Forward P/E\s*.*?<td.*?>(.*?)</td>', r.text, re.DOTALL)
-            if not m_fwd: # Alternatieve layout
-                m_fwd = re.search(r'Forward P/E.*?([\d\.]+)', r.text)
+            # Regex voor PEG en Forward PE in Yahoo HTML
+            m_fwd = re.search(r'Forward P/E.*?([\d\.]+)', r.text)
             if m_fwd: 
-                try: data['fwd_pe'] = float(re.sub(r'[^\d\.]', '', m_fwd.group(1)))
+                try: data['fwd_pe'] = float(m_fwd.group(1))
                 except: pass
-
-            # PEG Ratio
-            m_peg = re.search(r'PEG Ratio \(5 yr expected\)\s*.*?<td.*?>(.*?)</td>', r.text, re.DOTALL)
-            if not m_peg:
-                 m_peg = re.search(r'PEG Ratio \(5 yr expected\).*?([\d\.]+)', r.text)
+            
+            m_peg = re.search(r'PEG Ratio \(5 yr expected\).*?([\d\.]+)', r.text)
             if m_peg:
-                try: data['peg'] = float(re.sub(r'[^\d\.]', '', m_peg.group(1)))
+                try: data['peg'] = float(m_peg.group(1))
                 except: pass
     except: pass
-
     return data
 
 @st.cache_data(ttl=3600)
@@ -167,7 +156,7 @@ def calculate_score(m):
     score, total = 0, 0
     opps, risks, neut = [], [], []
     
-    if m['peg']:
+    if m.get('peg'):
         total+=1
         if 0<m['peg']<1.5: score+=1; opps.append(f"PEG ({m['peg']:.2f}) goedkoop.")
         elif m['peg']<0: risks.append("Negatieve PEG.")
@@ -191,7 +180,25 @@ def calculate_score(m):
 
     return (score/total)*10 if total>0 else 5.0, opps, risks, neut
 
-# --- DATA BEHEER (FIXED) ---
+# --- DATA MANAGER (CALLBACK LOGIC FIX) ---
+def load_file_callback():
+    """Wordt alleen aangeroepen bij file change"""
+    uploaded_file = st.session_state.get('file_loader')
+    if uploaded_file is not None:
+        try:
+            uploaded_file.seek(0)
+            data = json.load(uploaded_file)
+            
+            if isinstance(data, list):
+                st.session_state['portfolio'] = data
+            elif isinstance(data, dict):
+                st.session_state['portfolio'] = data.get('portfolio', [])
+                st.session_state['wishlist'] = data.get('wishlist', [])
+            
+            st.toast("✅ Data succesvol ingeladen!", icon="💾")
+        except Exception as e:
+            st.error(f"Fout: {e}")
+
 def get_json_data():
     return json.dumps({
         'portfolio': st.session_state['portfolio'],
@@ -201,33 +208,23 @@ def get_json_data():
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data")
 
-# Download (Altijd vers)
 st.sidebar.download_button(
     f"⬇️ Download ({len(st.session_state['portfolio'])} port / {len(st.session_state['wishlist'])} wish)",
     get_json_data(),
-    "aandelen_backup.json",
+    "aandelen.json",
     "application/json"
 )
 
-# Upload (Directe processing)
-up = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
-if up:
-    try:
-        up.seek(0)
-        d = json.load(up)
-        # Support voor beide formaten
-        if isinstance(d, list): 
-            st.session_state['portfolio'] = d
-            # Wishlist blijft behouden of leeg
-        elif isinstance(d, dict):
-            st.session_state['portfolio'] = d.get('portfolio', [])
-            st.session_state['wishlist'] = d.get('wishlist', [])
-        
-        st.sidebar.success("✅ Geladen!")
-    except Exception as e: 
-        st.sidebar.error(f"Fout: {e}")
+# Upload met callback
+st.sidebar.file_uploader(
+    "⬆️ Upload", 
+    type=['json'], 
+    key='file_loader', 
+    on_change=load_file_callback
+)
 
-if st.sidebar.button("🔄 Cache Legen"):
+st.sidebar.divider()
+if st.sidebar.button("🗑️ Reset Cache"):
     st.cache_data.clear()
     st.rerun()
 
@@ -272,12 +269,10 @@ with tabs[0]:
                 mt = sel_ticker
                 mi = info
                 
-                # 1. Mapping
                 if sel_ticker in EU_TO_US_MAP:
                     mt = EU_TO_US_MAP[sel_ticker]
                     mi = yf.Ticker(mt).info
-                # 2. Dynamic Parent Search
-                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio', 'targetMeanPrice']):
+                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio']):
                     sn = safe_get(info, 'shortName', '')
                     us_t = find_primary_ticker(sn)
                     if us_t and us_t != sel_ticker:
@@ -285,65 +280,41 @@ with tabs[0]:
                         mi = yf.Ticker(us_t).info
 
                 fin = get_finviz_data(mt)
-                scrape = scrape_yahoo_advanced(mt) # De nieuwe scraper
+                scrape = scrape_yahoo_advanced(mt)
 
-                # METRICS LOGICA
                 def get_m(y_k, f_k, scrape_k=None, calc=None):
-                    # 1. Yahoo API
-                    val = safe_get(mi, y_k)
-                    if val is not None: return val, "Yahoo"
-                    # 2. Yahoo Web Scraper (Nieuw!)
+                    if safe_get(mi, y_k) is not None: return mi[y_k], "Yahoo"
                     if scrape_k and scrape.get(scrape_k): return scrape[scrape_k], "Yahoo Web"
-                    # 3. Finviz
                     if f_k and fin.get(f_k): return fin[f_k], "Finviz"
-                    # 4. Calc
                     if calc:
                         c = calc()
                         if c is not None: return c, "Berekend"
                     return None, "N/A"
 
-                # PEG
                 def c_peg():
                     p = safe_get(mi, 'trailingPE') or safe_get(mi, 'forwardPE')
                     g = safe_get(mi, 'earningsGrowth')
                     if not g: g = safe_get(mi, 'revenueGrowth')
                     if p and g and g>0: return p/(g*100)
                     return None
+                
+                # Metrics
                 peg, peg_src = get_m('pegRatio', 'peg', 'peg', c_peg)
-
-                # Fwd PE
                 fwd_pe, fwd_src = get_m('forwardPE', 'fwd_pe', 'fwd_pe')
-                
-                # Overige
                 pb, pb_src = get_m('priceToBook', 'pb')
-                tgt, tgt_src = get_m('targetMeanPrice', 'target')
                 
+                tgt, tgt_src = get_m('targetMeanPrice', 'target')
+                tgt_eur, upside = None, ""
                 if tgt:
-                    t_curr = safe_get(mi, 'currency', 'USD')
-                    t_rate = get_currency_rate(t_curr, "EUR")
+                    t_rate = get_currency_rate(safe_get(mi, 'currency', 'USD'), "EUR")
                     tgt_eur = tgt * t_rate
                     upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%"
-                else: tgt_eur, upside = None, ""
 
-                # Math Engine voor de rest
-                def c_de():
-                    d = safe_get(mi, 'totalDebt')
-                    e = safe_get(mi, 'totalStockholderEquity')
-                    if d and e: return d/e
-                    return None
-                de, de_src = get_m('debtToEquity', None, None, c_de)
-                if de and de > 10: de /= 100
-
-                def c_cr():
-                    ca = safe_get(mi, 'totalCurrentAssets')
-                    cl = safe_get(mi, 'totalCurrentLiabilities')
-                    if ca and cl: return ca/cl
-                    return None
-                cr, cr_src = get_m('currentRatio', None, None, c_cr)
-
+                de, de_src = get_m('debtToEquity', None)
+                if de and de > 10: de/=100
+                cr, cr_src = get_m('currentRatio', None)
                 roe, roe_src = get_m('returnOnEquity', None)
                 
-                # Dividend Calc
                 dy, dy_src = get_m('dividendYield', None)
                 if not dy:
                     dr = safe_get(mi, 'dividendRate')
@@ -357,7 +328,6 @@ with tabs[0]:
                 beta = safe_get(mi, 'beta')
                 marg = safe_get(mi, 'profitMargins')
                 
-                # RSI
                 d = hist['Close'].diff()
                 g = (d.where(d>0, 0)).rolling(14).mean()
                 l = (-d.where(d<0, 0)).rolling(14).mean()
@@ -365,7 +335,7 @@ with tabs[0]:
                 rsi = 100 - (100/(1+rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
 
-                # HEADER
+                # UI
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     st.title(truncate_text(safe_get(info, 'shortName', sel_ticker)))
@@ -479,6 +449,9 @@ with tabs[1]:
                 s = yf.Ticker(t)
                 h = s.history(period="1d")
                 
+                p_eur = 0
+                rate = 1.0
+                
                 if not h.empty:
                     raw = h['Close'].iloc[-1]
                     curr = safe_get(s.info, 'currency', 'EUR')
@@ -521,7 +494,7 @@ with tabs[1]:
         k1, k2, k3 = st.columns(3)
         k1.metric("Waarde", f"€ {total_val:,.2f}")
         k2.metric("Winst", f"€ {prof:,.2f}", delta=f"{(prof/total_inv)*100:.1f}%" if total_inv else "0%")
-        k3.metric("Inleg", f"€ {tot_inv:,.2f}")
+        k3.metric("Inleg", f"€ {total_inv:,.2f}")
         st.divider()
         
         c_pie, c_div = st.columns(2)

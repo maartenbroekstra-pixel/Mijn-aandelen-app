@@ -154,43 +154,57 @@ with tabs[0]:
                                 st.toast(f"{selected_ticker} toegevoegd!", icon="✅")
 
                 # --- METRICS BEREKENEN ---
-                # PEG fix: als yfinance niks geeft, zelf proberen (P/E gedeeld door Growth)
+                
+                # 1. PEG Ratio (met fallback)
                 pe = safe_get(info, 'trailingPE')
                 fwd_pe = safe_get(info, 'forwardPE')
-                growth = safe_get(info, 'earningsGrowth') # bv 0.15 voor 15%
+                growth = safe_get(info, 'earningsGrowth') 
                 peg = safe_get(info, 'pegRatio')
                 
                 if peg is None and pe and growth:
+                    # PEG = PE / (Growth Rate * 100)
                     peg = pe / (growth * 100)
                 
-                pb = safe_get(info, 'priceToBook')
-                div = safe_get(info, 'dividendYield')
-                if div is None: div = 0.0
+                # 2. Dividend (Robuustere Check)
+                div_yield = safe_get(info, 'dividendYield')
+                if div_yield is None:
+                    # Fallback: Probeer dividendRate / huidige prijs
+                    div_rate = safe_get(info, 'dividendRate')
+                    if div_rate and current_price_orig > 0:
+                        div_yield = div_rate / current_price_orig
+                    else:
+                        div_yield = 0.0
                 
+                # 3. Overige Metrics
+                pb = safe_get(info, 'priceToBook')
                 de = safe_get(info, 'debtToEquity')
                 de_ratio = de / 100 if de else None
+                beta = safe_get(info, 'beta')
 
-                # RSI (Handmatig)
+                # 4. RSI (Handmatig)
                 delta = hist['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
                 rs = gain / loss
                 rsi = 100 - (100 / (1 + rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
+                
+                # 5. Koersdoel
+                target_price = safe_get(info, 'targetMeanPrice')
+                target_eur = target_price * eur_rate if target_price else None
 
-                # --- METRICS DASHBOARD ---
+                # --- METRICS DASHBOARD (2 RIJEN) ---
                 st.subheader("📊 Fundamentele Cijfers")
                 
+                # RIJ 1
                 m1, m2, m3, m4, m5 = st.columns(5)
                 
                 with m1:
-                    # PEG Logic
                     val = peg if peg else 0
                     color = "🟢" if 0 < val < 1 else ("🟠" if val < 0 else ("🟡" if val < 2 else "🔴"))
                     st.metric("PEG Ratio", f"{color} {val:.2f}" if peg else "N/A", help="Negatief = Krimpende winst. 0-1 = Ondergewaardeerd.")
                 
                 with m2:
-                    # Forward PE Logic
                     val = fwd_pe if fwd_pe else 0
                     color = "🟢" if 0 < val < 15 else "🟡"
                     st.metric("Forward P/E", f"{color} {val:.1f}" if fwd_pe else "N/A", help="Verwachte K/W voor komend jaar.")
@@ -201,16 +215,39 @@ with tabs[0]:
                     st.metric("ROE", f"{color} {roe:.1%}", help="Return on Equity. >15% is sterk.")
                 
                 with m4:
-                    # Debt Logic
                     val = de_ratio if de_ratio else 0
                     color = "🟢" if val < 1.0 else "🟠"
                     st.metric("Debt/Equity", f"{color} {val:.2f}" if de_ratio else "N/A", help="< 1.0 is gezond.")
                 
                 with m5:
-                    # RSI Logic
                     val = rsi_val
                     color = "🟢" if val < 30 else ("🔴" if val > 70 else "⚪")
                     st.metric("RSI (Timing)", f"{color} {val:.0f}", help="<30 Oversold (Koopkans?), >70 Overbought.")
+                
+                # RIJ 2
+                st.write("") # Witregel
+                m6, m7, m8, m9, m10 = st.columns(5)
+                
+                with m6:
+                    # DIVIDEND
+                    st.metric("Dividend", f"{div_yield:.2%}", help="Jaarlijks dividend rendement.")
+                    
+                with m7:
+                    # BETA
+                    st.metric("Beta", f"{beta:.2f}" if beta else "1.00", help="Volatiliteit t.o.v. markt (1.0)")
+                    
+                with m8:
+                    # P/B RATIO
+                    color = "🟢" if pb and pb < 1.5 else "⚪"
+                    st.metric("P/B Ratio", f"{color} {pb:.2f}" if pb else "N/A", help="Prijs / Boekwaarde")
+                    
+                with m9:
+                    # KOERSDOEL
+                    st.metric("Analisten Doel", f"€ {target_eur:.2f}" if target_eur else "N/A")
+                    
+                with m10:
+                    # RUIMTE OPVULLING of EVENTUEEL SECTOR
+                    st.caption(f"Sector:\n{safe_get(info, 'sector', '-')}")
 
                 # --- GRAFIEK ---
                 st.markdown("### 📈 Koersverloop")
@@ -234,7 +271,6 @@ with tabs[0]:
                             st.caption(f"Bron: {pub}")
                             st.markdown("---")
                 else:
-                    # Fallback knop als yfinance faalt
                     st.info("Geen direct nieuws geladen via de API.")
                     search_url = f"https://finance.yahoo.com/quote/{selected_ticker}/news"
                     st.markdown(f"[👉 Klik hier voor het laatste nieuws op Yahoo Finance]({search_url})")

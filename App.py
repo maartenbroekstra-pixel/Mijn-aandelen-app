@@ -13,33 +13,34 @@ import numpy as np
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# --- STATE INITIALISATIE ---
+# --- STATE ---
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
-if 'search_query' not in st.session_state: st.session_state['search_query'] = ""
+
+# --- CACHE CONTROL ---
+# Knop om data te verversen (cache legen)
+if st.sidebar.button("🔄 Ververs Alle Data"):
+    st.cache_data.clear()
+    st.rerun()
 
 # --- HULPFUNCTIES ---
 
 @st.cache_data(ttl=3600)
 def get_currency_rate(from_currency, to_currency="EUR"):
-    """Haalt wisselkoers op. Robuuster voor USD/EUR."""
     if from_currency == to_currency: return 1.0
     if not from_currency or from_currency == 'nan': return 1.0
-    
     try:
-        # Yahoo tickers: EUR=X is meestal de koers van 1 USD in EUR (~0.95)
-        # EURUSD=X is de koers van 1 EUR in USD (~1.05)
-        if from_currency == "USD" and to_currency == "EUR":
-            ticker = "EUR=X" 
-        elif from_currency == "GBP" and to_currency == "EUR":
-            ticker = "EURGBP=X"
-        else:
-            ticker = f"{from_currency}{to_currency}=X"
-            
+        # Probeer EUR=X (USD->EUR)
+        ticker = "EUR=X" if from_currency == "USD" and to_currency == "EUR" else f"{from_currency}{to_currency}=X"
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
+            # Sanity check: USD/EUR moet < 1.0 zijn (bv 0.95). Als > 1.05, is het wss omgekeerd.
+            if from_currency == "USD" and to_currency == "EUR" and rate > 1.05:
+                return 1 / rate
             return rate
+        # Fallback
+        if from_currency == "USD": return 0.95
         return 1.0
     except: return 1.0
 
@@ -48,14 +49,40 @@ def safe_get(info_dict, key, default=None):
     val = info_dict.get(key)
     return val if val is not None else default
 
-def truncate_text(text, max_len=25):
+def truncate_text(text, max_len=20):
     if text and len(text) > max_len: return text[:max_len] + "..."
     return text
+
+@st.cache_data(ttl=3600)
+def get_finviz_data(ticker):
+    """Haalt data van Finviz (Back-up)"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        url = f"https://finviz.com/quote.ashx?t={ticker}"
+        r = requests.get(url, headers=headers, timeout=5)
+        data = {}
+        if r.status_code == 200:
+            text = r.text
+            # Regex voor metrics
+            if 'PEG' in text: 
+                m = re.search(r'>PEG<.*?<b>\s*([\d\.]+)\s*</b>', text, re.DOTALL)
+                if m: data['peg'] = float(m.group(1))
+            if 'P/B' in text:
+                m = re.search(r'>P/B<.*?<b>\s*([\d\.]+)\s*</b>', text, re.DOTALL)
+                if m: data['pb'] = float(m.group(1))
+            if 'Forward P/E' in text:
+                m = re.search(r'>Forward P/E<.*?<b>\s*([\d\.]+)\s*</b>', text, re.DOTALL)
+                if m: data['fwd_pe'] = float(m.group(1))
+            if 'Target Price' in text:
+                m = re.search(r'>Target Price<.*?<b>\s*([\d\.]+)\s*</b>', text, re.DOTALL)
+                if m: data['target'] = float(m.group(1))
+        return data
+    except: return {}
 
 def search_yahoo(query):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=US&quotesCount=5"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=6"
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
         results = []
@@ -64,564 +91,473 @@ def search_yahoo(query):
                 symbol = q.get('symbol')
                 name = q.get('shortname', q.get('longname', symbol))
                 exch = q.get('exchange', 'N/A')
-                results.append(f"{symbol} | {name} ({exch})")
+                # Markeer Duitse tickers
+                label = f"{symbol} | {name} ({exch})"
+                results.append(label)
         return results
     except: return []
 
 @st.cache_data(ttl=3600)
 def get_youtube_video_id(query):
     try:
-        search_query = f"{query} stock analysis {datetime.now().year}"
-        url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
+        q = f"{query} stock analysis {datetime.now().year}"
+        url = f"https://www.youtube.com/results?search_query={q.replace(' ', '+')}"
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=5)
-        video_ids = re.findall(r"watch\?v=(\S{11})", response.text)
-        if video_ids: return video_ids[0]
-        return None
-    except: return None
-
-@st.cache_data(ttl=3600)
-def get_finviz_data(ticker):
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://finviz.com/quote.ashx?t={ticker}"
         r = requests.get(url, headers=headers, timeout=5)
-        data = {}
-        if r.status_code == 200:
-            if 'PEG' in r.text:
-                try: data['peg'] = float(re.search(r'>PEG<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
-                except: pass
-            if 'P/B' in r.text:
-                try: data['pb'] = float(re.search(r'>P/B<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
-                except: pass
-            if 'Target Price' in r.text:
-                try: data['target'] = float(re.search(r'>Target Price<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
-                except: pass
-            if 'Forward P/E' in r.text:
-                try: data['fwd_pe'] = float(re.search(r'>Forward P/E<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
-                except: pass
-        return data
-    except: return {}
+        vids = re.findall(r"watch\?v=(\S{11})", r.text)
+        return vids[0] if vids else None
+    except: return None
 
 def get_google_news(query):
     try:
-        search_q = f"{query} stock finance news"
-        url = f"https://news.google.com/rss/search?q={search_q}&hl=en-US&gl=US&ceid=US:en"
+        q = f"{query} stock finance news"
+        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
         r = requests.get(url, timeout=5)
         root = ET.fromstring(r.content)
-        news_items = []
+        items = []
         for item in root.findall('./channel/item')[:5]:
             title = item.find('title').text
             link = item.find('link').text
             try:
-                pubDate = item.find('pubDate').text
-                dt = datetime.strptime(pubDate[:16], '%a, %d %b %Y')
-                date_str = dt.strftime('%d %b %Y')
-            except: date_str = ""
-            news_items.append({"title": title, "link": link, "date": date_str})
-        return news_items
+                dt = datetime.strptime(item.find('pubDate').text[:16], '%a, %d %b %Y')
+                d_str = dt.strftime('%d %b %Y')
+            except: d_str = ""
+            items.append({"title": title, "link": link, "date": d_str})
+        return items
     except: return []
 
 def calculate_score(metrics):
     score = 0
-    total_checks = 0
-    opportunities = []
-    risks = []
-    neutral = []
-
-    # 1. PEG
+    total = 0
+    opps, risks, neut = [], [], []
+    
+    # PEG
     peg = metrics.get('peg')
     if peg is not None:
-        total_checks += 1
-        if 0 < peg < 1.5:
-            score += 1
-            opportunities.append(f"Waardering: Aantrekkelijke PEG ratio ({peg:.2f}).")
-        elif peg < 0:
-            risks.append("Groei: Winst krimpt (Negatieve PEG).")
-        elif peg > 2.5:
-            risks.append(f"Waardering: Koers loopt voor op groei (PEG: {peg:.2f}).")
-        else:
-            score += 0.5
-            neutral.append(f"Waardering: PEG ({peg:.2f}) is marktconform.")
-
-    # 2. Forward P/E
-    fwd_pe = metrics.get('fwd_pe')
-    if fwd_pe is not None:
-        total_checks += 1
-        if 0 < fwd_pe < 20:
-            score += 1
-            opportunities.append(f"Verwachting: Lage verwachte K/W ({fwd_pe:.1f}x).")
-        elif fwd_pe > 40:
-            risks.append(f"Verwachting: Hoge verwachte K/W ({fwd_pe:.1f}x).")
-        else:
-            score += 0.5
-            neutral.append(f"Verwachting: Forward P/E ({fwd_pe:.1f}x) is redelijk.")
-
-    # 3. ROE
+        total += 1
+        if 0 < peg < 1.5: score += 1; opps.append(f"PEG ({peg:.2f}) is aantrekkelijk.")
+        elif peg < 0: risks.append("Negatieve PEG (Krimp).")
+        elif peg > 2.5: risks.append(f"Hoge PEG ({peg:.2f}).")
+        else: score += 0.5; neut.append(f"PEG ({peg:.2f}) marktconform.")
+    
+    # Fwd PE
+    fwd = metrics.get('fwd_pe')
+    if fwd is not None:
+        total += 1
+        if 0 < fwd < 20: score += 1; opps.append(f"Lage Forward P/E ({fwd:.1f}).")
+        elif fwd > 40: risks.append(f"Hoge Forward P/E ({fwd:.1f}).")
+        else: score += 0.5; neut.append(f"Forward P/E ({fwd:.1f}) redelijk.")
+        
+    # ROE
     roe = metrics.get('roe')
     if roe is not None:
-        total_checks += 1
-        if roe > 0.15:
-            score += 1
-            opportunities.append(f"Kwaliteit: Sterke winstgevendheid (ROE: {roe:.1%}).")
-        elif roe < 0.05:
-            risks.append(f"Kwaliteit: Zwakke winstgevendheid (ROE: {roe:.1%}).")
-        else:
-            score += 0.5
-            neutral.append(f"Kwaliteit: ROE ({roe:.1%}) is gemiddeld.")
-
-    # 4. Debt/Equity
+        total += 1
+        if roe > 0.15: score += 1; opps.append(f"Sterke ROE ({roe:.1%}).")
+        elif roe < 0.05: risks.append(f"Zwakke ROE ({roe:.1%}).")
+        else: score += 0.5; neut.append(f"ROE ({roe:.1%}) gemiddeld.")
+        
+    # Debt
     de = metrics.get('de')
     if de is not None:
-        total_checks += 1
-        if de < 1.0:
-            score += 1
-            opportunities.append("Balans: Gezond schuldenniveau.")
-        elif de > 2.0:
-            risks.append(f"Risico: Hoge schuldenlast (D/E: {de:.2f}).")
-        else:
-            score += 0.5
-            neutral.append("Balans: Schulden zijn acceptabel.")
-
-    # 5. Current Ratio
+        total += 1
+        if de < 1.0: score += 1; opps.append("Gezonde balans (weinig schuld).")
+        elif de > 2.0: risks.append(f"Veel schulden (D/E: {de:.2f}).")
+        else: score += 0.5; neut.append("Schuldniveau acceptabel.")
+        
+    # Current Ratio
     cr = metrics.get('cr')
     if cr is not None:
-        total_checks += 1
-        if cr > 1.5:
-            score += 1
-            opportunities.append("Liquiditeit: Voldoende cash buffer.")
-        elif cr < 1.0:
-            risks.append("Liquiditeit: Krap bij kas (CR < 1).")
-        else:
-            score += 0.5
-            neutral.append("Liquiditeit: Voldoende.")
-
-    # 6. P/B
+        total += 1
+        if cr > 1.5: score += 1; opps.append("Goede liquiditeit.")
+        elif cr < 1.0: risks.append("Krap bij kas (<1.0).")
+        else: score += 0.5; neut.append("Liquiditeit voldoende.")
+        
+    # P/B
     pb = metrics.get('pb')
     if pb is not None:
-        total_checks += 1
-        if 0 < pb < 3.0:
-            score += 1
-            opportunities.append("Substantie: Koers dichtbij boekwaarde.")
-        elif pb > 10:
-            risks.append(f"Waardering: Hoge premie boven boekwaarde (P/B: {pb:.2f}).")
-        else:
-            score += 0.5
-            neutral.append(f"Substantie: P/B ({pb:.2f}) is normaal.")
+        total += 1
+        if 0 < pb < 3.0: score += 1; opps.append("Koers dichtbij boekwaarde.")
+        elif pb > 10: risks.append(f"Hoge P/B ({pb:.2f}).")
+        else: score += 0.5; neut.append("P/B normaal.")
 
-    final_score = (score / total_checks) * 10 if total_checks > 0 else 5.0
-    return final_score, opportunities, risks, neutral
+    final = (score / total) * 10 if total > 0 else 5.0
+    return final, opps, risks, neut
 
-# --- PORTFOLIO BEHEER ---
+# --- SAVE/LOAD ---
 def save_data():
-    data = {'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']}
-    return json.dumps(data)
+    return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
-def load_data(uploaded_file):
-    if uploaded_file:
-        try:
-            data = json.load(uploaded_file)
-            if isinstance(data, list): # Oude structuur
-                st.session_state['portfolio'] = data
-                st.session_state['wishlist'] = []
-            else: # Nieuwe structuur
-                st.session_state['portfolio'] = data.get('portfolio', [])
-                st.session_state['wishlist'] = data.get('wishlist', [])
-            st.success("✅ Data geladen!")
-        except: st.error("❌ Bestand niet leesbaar.")
+def load_data(f):
+    try:
+        d = json.load(f)
+        if isinstance(d, list): st.session_state['portfolio'] = d
+        else:
+            st.session_state['portfolio'] = d.get('portfolio', [])
+            st.session_state['wishlist'] = d.get('wishlist', [])
+        st.success("✅ Data geladen!")
+    except: st.error("Fout bestand.")
 
-# --- ZIJBALK ---
-st.sidebar.header("💾 Opslag")
-st.sidebar.download_button("⬇️ Download Data (Alles)", save_data(), "aandelen_data.json", "application/json")
-uploaded = st.sidebar.file_uploader("⬆️ Upload Data", type=['json'])
-if uploaded: load_data(uploaded)
-st.sidebar.markdown("---")
-st.sidebar.info("Tip: Gebruik de zoekbalk voor analyse.")
+# --- SIDEBAR ---
+st.sidebar.header("📂 Data")
+st.sidebar.download_button("⬇️ Download Alles", save_data(), "aandelen_data.json", "application/json")
+up = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
+if up: load_data(up)
+st.sidebar.divider()
+st.sidebar.info("Tip: Gebruik .DE of .F tickers voor Xetra koersen!")
 
-# --- TABBLADEN ---
+# --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
 
 # ==================================================
 # TAB 1: ANALYSE
 # ==================================================
 with tabs[0]:
-    col_search, col_period = st.columns([3, 1])
-    with col_search:
-        default_search = st.session_state.get('search_query', "")
-        search_text = st.text_input("🔍 Zoek Aandeel:", value=default_search, placeholder="Bijv. PDD, Salesforce...", key="search_input")
+    c_search, c_period = st.columns([3, 1])
+    with c_search:
+        def_q = st.session_state.get('search_query', "")
+        txt = st.text_input("Zoek Aandeel:", value=def_q, placeholder="Bijv. PDD, ASML.AS...", key="search")
         
-        selected_ticker = None
-        if search_text and "." in search_text and " " not in search_text: selected_ticker = search_text
-        elif search_text:
-            results = search_yahoo(search_text)
-            if results:
-                choice = st.selectbox("Kies bedrijf:", results)
-                selected_ticker = choice.split(" | ")[0]
-            else: selected_ticker = search_text.upper()
-    
-    with col_period:
-        period = st.selectbox("Periode:", ["1mo", "6mo", "1y", "3y", "5y"], index=2)
+        sel_ticker = None
+        if txt and "." in txt and " " not in txt: sel_ticker = txt
+        elif txt:
+            res = search_yahoo(txt)
+            if res:
+                ch = st.selectbox("Resultaten:", res)
+                sel_ticker = ch.split(" | ")[0]
+            else: sel_ticker = txt.upper()
+            
+    with c_period:
+        per = st.selectbox("Periode", ["1mo", "6mo", "1y", "3y", "5y"], index=2)
 
-    if selected_ticker:
+    if sel_ticker:
         try:
-            stock = yf.Ticker(selected_ticker)
+            stock = yf.Ticker(sel_ticker)
             info = stock.info
-            hist = stock.history(period=period)
+            hist = stock.history(period=per)
             
             if hist.empty:
-                st.error("Geen data gevonden. Check de ticker.")
+                st.error("Geen data. Probeer een andere ticker (bv. 0DD.F voor PDD op Xetra).")
             else:
                 curr = safe_get(info, 'currency', 'EUR')
-                eur_rate = get_currency_rate(curr, "EUR")
-                price_eur = hist['Close'].iloc[-1] * eur_rate
-                finviz_data = get_finviz_data(selected_ticker)
-
-                tgt = safe_get(info, 'targetMeanPrice')
-                if tgt is None and 'target' in finviz_data: tgt = finviz_data['target']
-                tgt_eur = tgt * eur_rate if tgt else None
-                upside_txt = ""
-                if tgt_eur:
-                    upside = ((tgt_eur - price_eur) / price_eur) * 100
-                    upside_txt = f"{'+' if upside > 0 else ''}{upside:.1f}%"
-
-                st.markdown("---")
-                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-                with c1:
-                    full_name = safe_get(info, 'shortName', selected_ticker)
-                    st.title(truncate_text(full_name, 25))
-                    st.caption(f"{selected_ticker} | {safe_get(info, 'exchange', '-')}")
-                with c2: st.metric("Koers", f"€ {price_eur:.2f}")
-                with c3: st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside_txt if tgt_eur else None)
-                with c4:
-                    with st.popover("➕ Toevoegen"):
-                        tab_p, tab_w = st.tabs(["Portfolio", "Wishlist"])
-                        with tab_p:
-                            with st.form("add_port"):
-                                amt = st.number_input("Aantal", min_value=0.0, value=1.0)
-                                price = st.number_input("GAK (€)", value=float(round(price_eur, 2)))
-                                if st.form_submit_button("In Portfolio"):
-                                    st.session_state['portfolio'].append({"ticker": selected_ticker, "amount": amt, "avg_price_eur": price})
-                                    st.toast("Toegevoegd aan Portfolio!", icon="✅")
-                        with tab_w:
-                            if st.button("Zet op Wishlist"):
-                                if selected_ticker not in [x['ticker'] for x in st.session_state['wishlist']]:
-                                    st.session_state['wishlist'].append({"ticker": selected_ticker, "name": full_name})
-                                    st.toast("Toegevoegd aan Wishlist!", icon="❤️")
-                                else: st.toast("Staat al op wishlist", icon="⚠️")
-
+                rate = get_currency_rate(curr, "EUR")
+                price_eur = hist['Close'].iloc[-1] * rate
+                
+                # Data verzamelen
+                fin = get_finviz_data(sel_ticker)
+                
                 pe = safe_get(info, 'trailingPE')
                 fwd_pe = safe_get(info, 'forwardPE')
-                if fwd_pe is None and 'fwd_pe' in finviz_data: fwd_pe = finviz_data['fwd_pe']
+                if fwd_pe is None: fwd_pe = fin.get('fwd_pe')
                 
                 peg = safe_get(info, 'pegRatio')
                 peg_src = "Yahoo"
-                if peg is None and 'peg' in finviz_data: peg = finviz_data['peg']; peg_src = "Finviz"
-                if peg is None:
+                if peg is None: peg = fin.get('peg'); peg_src = "Finviz"
+                if peg is None and (pe or fwd_pe):
                     base_pe = pe if pe else fwd_pe
-                    growth = safe_get(info, 'earningsGrowth')
-                    if base_pe and growth: peg = base_pe / (growth * 100); peg_src = "Schatting"
+                    g = safe_get(info, 'earningsGrowth')
+                    if base_pe and g: peg = base_pe/(g*100); peg_src = "Schatting"
 
-                div_yield = safe_get(info, 'dividendYield')
-                if div_yield is None:
-                    div_rate = safe_get(info, 'dividendRate')
-                    if div_rate: div_yield = div_rate / hist['Close'].iloc[-1]
-                if div_yield and div_yield > 0.5: div_yield = div_yield / 100
+                dy = safe_get(info, 'dividendYield')
+                if dy is None:
+                    dr = safe_get(info, 'dividendRate')
+                    if dr: dy = dr / hist['Close'].iloc[-1]
+                if dy and dy > 0.5: dy = dy / 100
                 
                 pb = safe_get(info, 'priceToBook')
-                if pb is None and 'pb' in finviz_data: pb = finviz_data['pb']
+                if pb is None: pb = fin.get('pb')
                 
-                de_ratio = safe_get(info, 'debtToEquity')
-                if de_ratio: de_ratio = de_ratio / 100
+                de = safe_get(info, 'debtToEquity')
+                de_r = de/100 if de else None
                 
                 cr = safe_get(info, 'currentRatio')
                 beta = safe_get(info, 'beta')
-                margin = safe_get(info, 'profitMargins')
-
+                marg = safe_get(info, 'profitMargins')
+                
                 delta = hist['Close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rs = gain / loss
-                rsi = 100 - (100 / (1 + rs))
+                gain = (delta.where(delta>0, 0)).rolling(14).mean()
+                loss = (-delta.where(delta<0, 0)).rolling(14).mean()
+                rs = gain/loss
+                rsi = 100 - (100/(1+rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
                 
-                metrics_dict = {'peg': peg, 'roe': safe_get(info, 'returnOnEquity'), 'de': de_ratio, 'cr': cr, 'fwd_pe': fwd_pe, 'pb': pb}
-                score, opps, risks, neutral = calculate_score(metrics_dict)
+                tgt = safe_get(info, 'targetMeanPrice')
+                if tgt is None: tgt = fin.get('target')
+                tgt_eur = tgt * rate if tgt else None
+                upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%" if tgt_eur else ""
+
+                # UI
+                st.markdown("---")
+                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
+                with c1:
+                    nm = safe_get(info, 'shortName', sel_ticker)
+                    st.title(truncate_text(nm))
+                    st.caption(f"{sel_ticker} | {safe_get(info, 'exchange', '-')}")
+                with c2: st.metric("Koers", f"€ {price_eur:.2f}")
+                with c3: st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside)
+                with c4:
+                    with st.popover("➕ Toevoegen"):
+                        tp, tw = st.tabs(["Portfolio", "Wishlist"])
+                        with tp:
+                            with st.form("fp"):
+                                a = st.number_input("Aantal", 1.0)
+                                p = st.number_input("GAK (€)", value=float(round(price_eur, 2)))
+                                if st.form_submit_button("Opslaan"):
+                                    st.session_state['portfolio'].append({"ticker": sel_ticker, "amount": a, "avg_price_eur": p})
+                                    st.toast("Toegevoegd!", icon="✅")
+                        with tw:
+                            if st.button("Zet op Wishlist"):
+                                exists = any(x['ticker'] == sel_ticker for x in st.session_state['wishlist'])
+                                if not exists:
+                                    st.session_state['wishlist'].append({"ticker": sel_ticker, "name": nm})
+                                    st.toast("Toegevoegd!", icon="❤️")
+
+                # SCORE
+                met_d = {'peg': peg, 'roe': safe_get(info, 'returnOnEquity'), 'de': de_r, 'cr': cr, 'fwd_pe': fwd_pe, 'pb': pb}
+                score, opps, risks, neut = calculate_score(met_d)
                 
                 st.markdown("### 🧬 Fundamentele Analyse")
                 with st.container(border=True):
-                    col_score, col_txt = st.columns([1, 4])
-                    with col_score:
-                        color = "green" if score >= 7 else ("orange" if score >= 5.5 else "red")
-                        st.markdown(f"""
-                        <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
-                            <div style="display: flex; justify-content: center; align-items: center; border: 6px solid {color}; width: 110px; height: 110px; border-radius: 50%;">
-                                <span style="margin: 0; padding: 0; color:{color}; font-size: 2.8rem; font-weight: bold; line-height: 1;">{score:.1f}</span>
-                            </div>
-                        </div>
-                        <p style="text-align:center; margin-top:5px; font-weight:bold;">AI Score</p>
-                        """, unsafe_allow_html=True)
-                    
-                    with col_txt:
-                        if not opps and not risks and not neutral: st.info("Onvoldoende data.")
-                        else:
-                            c_plus, c_min, c_neut = st.columns(3)
-                            with c_plus:
-                                if opps:
-                                    st.success("**✅ Kansen**")
-                                    for o in opps: st.write(f"- {o}")
-                                else: st.write("-")
-                            with c_min:
-                                if risks:
-                                    st.error("**⚠️ Risico's**")
-                                    for r in risks: st.write(f"- {r}")
-                                else: st.write("-")
-                            with c_neut:
-                                if neutral:
-                                    st.info("**⚪ Neutraal**")
-                                    for n in neutral: st.write(f"- {n}")
+                    sc, txt = st.columns([1, 4])
+                    with sc:
+                        col = "green" if score>=7 else ("orange" if score>=5.5 else "red")
+                        st.markdown(f"""<div style="display:flex;justify-content:center;"><div style="border:6px solid {col};width:100px;height:100px;border-radius:50%;display:flex;align-items:center;justify-content:center;"><span style="color:{col};font-size:2.5rem;font-weight:bold;">{score:.1f}</span></div></div>""", unsafe_allow_html=True)
+                    with txt:
+                        c_k, c_r, c_n = st.columns(3)
+                        with c_k:
+                            if opps:
+                                st.success("**✅ Kansen**")
+                                for o in opps: st.write(f"- {o}")
+                        with c_r:
+                            if risks:
+                                st.error("**⚠️ Risico's**")
+                                for r in risks: st.write(f"- {r}")
+                        with c_n:
+                            if neut:
+                                st.info("**⚪ Neutraal**")
+                                for n in neut: st.write(f"- {n}")
 
                 st.divider()
                 st.subheader("📊 Ratio's")
                 m1, m2, m3, m4, m5, m6 = st.columns(6)
+                
                 with m1:
-                    val = peg if peg else 0
-                    c = "🟢" if 0 < val < 1.5 else ("🟠" if val < 0 else "🟡")
-                    st.metric("PEG Ratio", f"{c} {val:.2f}" if peg else "N/A", help=f"Bron: {peg_src}\n\nPrijs t.o.v. Groei.\n< 1.5: Goed\nNegatief: Krimp")
+                    c = "🟢" if peg and 0<peg<1.5 else ("🟠" if peg and peg<0 else "🟡")
+                    st.metric("PEG Ratio", f"{c} {peg:.2f}" if peg else "N/A", help=f"Bron: {peg_src}")
                 with m2:
-                    val = fwd_pe if fwd_pe else 0
-                    st.metric("Forward P/E", f"{'🟢' if 0<val<20 else '🟡'} {val:.1f}" if fwd_pe else "N/A", help="Verwachte K/W.\n< 20: Aantrekkelijk")
+                    c = "🟢" if fwd_pe and 0<fwd_pe<20 else "🟡"
+                    st.metric("Forward P/E", f"{c} {fwd_pe:.1f}" if fwd_pe else "N/A")
                 with m3:
-                    val = cr if cr else 0
-                    st.metric("Current Ratio", f"{'🟢' if val>1.5 else '🟠'} {val:.2f}" if cr else "N/A", help="Liquiditeit.\n> 1.5: Veilig")
+                    c = "🟢" if cr and cr>1.5 else "🟠"
+                    st.metric("Current Ratio", f"{c} {cr:.2f}" if cr else "N/A")
                 with m4:
-                    val = de_ratio if de_ratio else 0
-                    st.metric("Debt/Equity", f"{'🟢' if val<1 else '🟠'} {val:.2f}" if de_ratio else "N/A", help="Schuldgraad.\n< 1.0: Gezond")
+                    c = "🟢" if de_r and de_r<1 else "🟠"
+                    st.metric("Debt/Equity", f"{c} {de_r:.2f}" if de_r else "N/A")
                 with m5:
-                    val = pb if pb else 0
-                    st.metric("P/B Ratio", f"{'🟢' if val<3 else '⚪'} {val:.2f}" if pb else "N/A", help="Prijs / Boekwaarde.\n< 3.0: Redelijk")
+                    st.metric("P/B Ratio", f"{pb:.2f}" if pb else "N/A")
                 with m6:
-                    roe = safe_get(info, 'returnOnEquity', 0)
-                    st.metric("ROE", f"{'🟢' if roe>0.15 else '🟡'} {roe:.1%}", help="Winstgevendheid.\n> 15%: Sterk")
+                    r = safe_get(info, 'returnOnEquity')
+                    c = "🟢" if r and r>0.15 else "🟡"
+                    st.metric("ROE", f"{c} {r:.1%}" if r else "N/A")
 
                 st.write("")
                 x1, x2, x3, x4 = st.columns(4)
                 with x1:
-                    dy = div_yield if div_yield else 0
-                    c = "🟢" if dy > 0.03 else ("🔵" if dy > 0.015 else "⚪")
-                    st.metric("Dividend", f"{c} {dy:.2%}", help="Jaarlijks dividend.\n> 3%: Hoog\n< 1.5%: Laag")
+                    c = "🟢" if dy and dy>0.03 else ("🔵" if dy and dy>0.015 else "⚪")
+                    st.metric("Dividend", f"{c} {dy:.2%}" if dy else "0%")
                 with x2:
-                    st.metric("RSI (14)", f"{'🟢' if rsi_val<30 else '⚪'} {rsi_val:.0f}", help="Momentum.\n< 30: Koopkans?\n> 70: Duur?")
+                    c = "🟢" if rsi_val<30 else "⚪"
+                    st.metric("RSI (14)", f"{c} {rsi_val:.0f}")
                 with x3:
-                    b = beta if beta else 1.0
-                    c = "🟢" if b < 0.8 else ("🟠" if b > 1.5 else "⚪")
-                    st.metric("Beta", f"{c} {b:.2f}", help="Volatiliteit.\n1.0: Markt\n< 1.0: Stabiel\n> 1.5: Wild")
+                    c = "🟢" if beta and beta<0.8 else ("🟠" if beta and beta>1.5 else "⚪")
+                    st.metric("Beta", f"{c} {beta:.2f}" if beta else "1.0")
                 with x4:
-                    m = margin if margin else 0
-                    c = "🟢" if m > 0.20 else ("🔵" if m > 0.10 else "🟠")
-                    st.metric("Winstmarge", f"{c} {m:.1%}", help="Netto winst als % van omzet.\n> 20%: Zeer winstgevend")
+                    c = "🟢" if marg and marg>0.2 else ("🔵" if marg and marg>0.1 else "🟠")
+                    st.metric("Winstmarge", f"{c} {marg:.1%}" if marg else "N/A")
 
                 st.markdown("### 📈 Koers")
                 fig = go.Figure()
-                col = '#00C805' if hist['Close'].iloc[-1] >= hist['Close'].iloc[0] else '#FF5000'
-                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', line=dict(color=col)))
+                lc = '#00C805' if hist['Close'].iloc[-1] >= hist['Close'].iloc[0] else '#FF5000'
+                fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', line=dict(color=lc)))
                 fig.update_layout(template="plotly_dark", margin=dict(t=10,b=0,l=0,r=0), height=350)
                 st.plotly_chart(fig, use_container_width=True)
 
-                c_news, c_vid = st.columns(2)
-                with c_news:
+                cn, cv = st.columns(2)
+                with cn:
                     st.markdown("### 📰 Nieuws")
-                    news = get_google_news(safe_get(info, 'shortName', selected_ticker))
-                    if news:
-                        for n in news:
-                            st.markdown(f"**[{n['title']}]({n['link']})**")
-                            st.caption(f"{n['date']}")
-                            st.divider()
-                    else: st.info("Geen nieuws.")
-                with c_vid:
+                    for n in get_google_news(safe_get(info, 'shortName', sel_ticker)):
+                        st.markdown(f"**[{n['title']}]({n['link']})**")
+                        st.caption(n['date'])
+                        st.divider()
+                with cv:
                     st.markdown("### 📺 Video")
-                    comp = safe_get(info, 'shortName', selected_ticker)
-                    video_id = get_youtube_video_id(comp)
-                    if video_id: st.video(f"https://www.youtube.com/watch?v={video_id}")
-                    yt_url = f"https://www.youtube.com/results?search_query={comp}+stock+analysis+{datetime.now().year}"
-                    st.markdown(f"👉 **[Zoek handmatig op YouTube]({yt_url})**")
+                    vid = get_youtube_video_id(safe_get(info, 'shortName', sel_ticker))
+                    if vid: st.video(f"https://www.youtube.com/watch?v={vid}")
+                    url = f"https://www.youtube.com/results?search_query={sel_ticker}+stock+analysis"
+                    st.markdown(f"👉 **[Zoek op YouTube]({url})**")
 
-        except Exception as e: st.error(f"Error: {e}")
+        except Exception as e: st.error(f"Fout: {e}")
 
 # ==================================================
 # TAB 2: PORTFOLIO
 # ==================================================
 with tabs[1]:
     st.title("Mijn Portfolio")
-    if not st.session_state['portfolio']:
-        st.info("Nog leeg. Voeg aandelen toe in tabblad 1!")
-    else:
+    
+    if st.session_state['portfolio']:
+        # --- EDITOR MODUS ---
+        with st.expander("✏️ Portfolio Bewerken / Correcties"):
+            st.info("Klopt een koers niet? Wijzig hier de ticker (bijv. PDD -> 0DD.F voor Xetra).")
+            
+            # We tonen een data editor om direct waarden aan te passen
+            df_edit = pd.DataFrame(st.session_state['portfolio'])
+            edited_df = st.data_editor(
+                df_edit, 
+                num_rows="dynamic",
+                column_config={
+                    "ticker": st.column_config.TextColumn("Ticker (bv. 0DD.F)"),
+                    "amount": st.column_config.NumberColumn("Aantal", min_value=0.0),
+                    "avg_price_eur": st.column_config.NumberColumn("GAK (€)", min_value=0.0)
+                },
+                key="editor"
+            )
+            
+            if st.button("💾 Wijzigingen Opslaan"):
+                st.session_state['portfolio'] = edited_df.to_dict('records')
+                st.rerun()
+
+        # --- BEREKENINGEN ---
         rows = []
         tot_inv = 0
         tot_val = 0
-        sector_dist = {}
-        dividend_calendar = []
+        sec_dist = {}
+        div_cal = []
         
         bar = st.progress(0)
-        total_items = len(st.session_state['portfolio'])
-
-        for i, item in enumerate(st.session_state['portfolio']):
+        items = st.session_state['portfolio']
+        for i, item in enumerate(items):
             try:
                 t = item['ticker']
                 s = yf.Ticker(t)
                 h = s.history(period="1d")
+                
+                p_eur = 0
+                rate = 1.0
+                
                 if not h.empty:
-                    raw_price = h['Close'].iloc[-1]
-                    inf = s.info
-                    
-                    # Verbeterde valuta conversie
-                    orig_cur = safe_get(inf, 'currency', 'EUR')
-                    rate = get_currency_rate(orig_cur, "EUR")
-                    
-                    p_eur = raw_price * rate
-                    val = p_eur * item['amount']
-                    cost = item['avg_price_eur'] * item['amount']
-                    profit_abs = val - cost
-                    profit_pct = (profit_abs / cost) * 100 if cost > 0 else 0
-                    
-                    sector = safe_get(inf, 'sector', 'Overig')
-                    sector_dist[sector] = sector_dist.get(sector, 0) + val
-                    
-                    # Dividend Info
-                    div_rate = safe_get(inf, 'dividendRate', 0)
-                    # Als rate 0 is maar yield niet, probeer te berekenen
-                    if not div_rate:
-                        yd = safe_get(inf, 'dividendYield')
-                        if yd: div_rate = yd * raw_price
-                    
-                    if div_rate:
-                        total_div_yr_eur = div_rate * rate * item['amount']
-                        ex_date = safe_get(inf, 'exDividendDate')
-                        ex_date_str = datetime.fromtimestamp(ex_date).strftime('%d-%m-%Y') if ex_date else "Onbekend"
-                        dividend_calendar.append({
-                            "Aandeel": t,
-                            "Ex-Date": ex_date_str,
-                            "Jaarlijks (€)": total_div_yr_eur,
-                            "Maandelijks (€)": total_div_yr_eur / 12
-                        })
-
-                    rows.append({
-                        "Ticker": t,
-                        "Bedrijf": safe_get(inf, 'shortName', t),
-                        "Aantal": item['amount'],
-                        "GAK (€)": item['avg_price_eur'],
-                        "Koers (€)": p_eur,
-                        "Waarde (€)": val,
-                        "Winst (€)": profit_abs,
-                        "Rendement (%)": profit_pct
-                    })
-                    tot_val += val
-                    tot_inv += cost
+                    raw = h['Close'].iloc[-1]
+                    curr = safe_get(s.info, 'currency', 'EUR')
+                    rate = get_currency_rate(curr, "EUR")
+                    p_eur = raw * rate
+                else:
+                    # Fallback als Yahoo faalt (behoudt GAK voor berekening, maar toont error)
+                    p_eur = item['avg_price_eur'] 
+                
+                val = p_eur * item['amount']
+                cost = item['avg_price_eur'] * item['amount']
+                prof = val - cost
+                
+                sec = safe_get(s.info, 'sector', 'Overig')
+                sec_dist[sec] = sec_dist.get(sec, 0) + val
+                
+                # Dividend
+                dr = safe_get(s.info, 'dividendRate')
+                if not dr:
+                    dy = safe_get(s.info, 'dividendYield')
+                    if dy and p_eur>0: dr = dy * (p_eur/rate)
+                
+                if dr:
+                    dy_eur = dr * rate * item['amount']
+                    ex = safe_get(s.info, 'exDividendDate')
+                    exs = datetime.fromtimestamp(ex).strftime('%d-%m-%Y') if ex else "-"
+                    div_cal.append({"Ticker": t, "Ex-Date": exs, "Jaarlijks (€)": dy_eur, "Mnd (€)": dy_eur/12})
+                
+                rows.append({
+                    "Ticker": t,
+                    "Aantal": item['amount'],
+                    "GAK (€)": item['avg_price_eur'],
+                    "Huidige Prijs (€)": p_eur,
+                    "Waarde (€)": val,
+                    "Winst (€)": prof,
+                    "Rendement (%)": (prof/cost)*100 if cost>0 else 0
+                })
+                tot_val += val
+                tot_inv += cost
             except: pass
-            bar.progress((i+1)/total_items)
+            bar.progress((i+1)/len(items))
         bar.empty()
-
-        # --- DASHBOARD ---
-        res = tot_val - tot_inv
+        
+        tres = tot_val - tot_inv
+        
+        # KPI's
         k1, k2, k3 = st.columns(3)
-        k1.metric("Totale Waarde", f"€ {tot_val:,.2f}")
-        k2.metric("Totaal Winst", f"€ {res:,.2f}", delta=f"{(res/tot_inv)*100:.1f}%" if tot_inv>0 else "0%")
-        k3.metric("Totale Inleg", f"€ {tot_inv:,.2f}")
+        k1.metric("Waarde", f"€ {tot_val:,.2f}")
+        k2.metric("Winst/Verlies", f"€ {tres:,.2f}", delta=f"{(tres/tot_inv)*100:.1f}%" if tot_inv>0 else "0%")
+        k3.metric("Inleg", f"€ {tot_inv:,.2f}")
         
         st.divider()
         
-        # --- GRAFIEKEN & DIVIDEND ---
-        c_chart, c_div = st.columns([1, 1])
-        
-        with c_chart:
+        # VISUALISATIE
+        c_sec, c_div = st.columns(2)
+        with c_sec:
             st.subheader("Sectoren")
-            if sector_dist:
-                fig = px.pie(values=list(sector_dist.values()), names=list(sector_dist.keys()), hole=0.4)
-                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=300)
+            if sec_dist:
+                fig = px.pie(values=list(sec_dist.values()), names=list(sec_dist.keys()), hole=0.4)
+                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=250)
                 st.plotly_chart(fig, use_container_width=True)
-            else: st.info("Geen sectordata.")
-            
         with c_div:
-            st.subheader("💰 Dividend Monitor")
-            if dividend_calendar:
-                div_df = pd.DataFrame(dividend_calendar)
-                total_monthly = div_df["Maandelijks (€)"].sum()
-                st.metric("Geschat Maandinkomen", f"€ {total_monthly:.2f}")
-                
-                st.dataframe(div_df[["Aandeel", "Ex-Date", "Jaarlijks (€)"]], use_container_width=True, hide_index=True, column_config={
-                    "Jaarlijks (€)": st.column_config.NumberColumn(format="€ %.2f")
-                })
-            else: st.info("Geen dividend-aandelen gevonden.")
+            st.subheader("💰 Dividend")
+            if div_cal:
+                df_d = pd.DataFrame(div_cal)
+                st.metric("Geschat Mnd Inkomen", f"€ {df_d['Mnd (€)'].sum():.2f}")
+                st.dataframe(df_d[["Ticker", "Ex-Date", "Jaarlijks (€)"]], hide_index=True, use_container_width=True)
+            else: st.info("Geen dividenddata.")
 
         st.subheader("Details")
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, column_config={
-            "Koers (€)": st.column_config.NumberColumn(format="€ %.2f"),
+            "Huidige Prijs (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Waarde (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Winst (€)": st.column_config.NumberColumn(format="€ %.2f"),
             "Rendement (%)": st.column_config.NumberColumn(format="%.1f%%")
         })
         
-        if st.button("Alles Wissen"):
-            st.session_state['portfolio'] = []
-            st.rerun()
-
-        # --- CALCULATOR ---
-        with st.expander("🧮 Rente-op-Rente Calculator"):
+        with st.expander("🧮 Rente-op-Rente Planner"):
             cc1, cc2, cc3, cc4 = st.columns(4)
-            start_bedrag = cc1.number_input("Startbedrag (€)", value=float(round(tot_val, 0)))
-            maand_inleg = cc2.number_input("Maandelijkse Inleg (€)", value=500)
-            jaren = cc3.number_input("Aantal Jaar", value=20)
-            rendement = cc4.number_input("Verwacht Rendement (%)", value=7.0)
+            sv = cc1.number_input("Start", value=float(round(tot_val, 0)))
+            mi = cc2.number_input("Mnd Inleg", 500)
+            jr = cc3.number_input("Jaren", 20)
+            rr = cc4.number_input("Rendement %", 7.0)
             
-            months = np.arange(jaren * 12 + 1)
-            monthly_rate = rendement / 100 / 12
+            mths = np.arange(jr*12+1)
+            mr = rr/100/12
+            fut, inv = [sv], [sv]
+            c, ci = sv, sv
+            for _ in range(len(mths)-1):
+                c = (c+mi)*(1+mr)
+                ci += mi
+                fut.append(c)
+                inv.append(ci)
             
-            # Future Value calculation
-            future_vals = [start_bedrag]
-            invested_vals = [start_bedrag]
+            st.metric(f"Na {jr} jaar", f"€ {fut[-1]:,.0f}", delta=f"Winst: € {fut[-1]-inv[-1]:,.0f}")
+            df_c = pd.DataFrame({"Maand": mths, "Waarde": fut, "Inleg": inv})
+            st.plotly_chart(px.line(df_c, x="Maand", y=["Waarde", "Inleg"]), use_container_width=True)
             
-            curr_val = start_bedrag
-            curr_inv = start_bedrag
-            
-            for i in range(1, len(months)):
-                curr_val = (curr_val + maand_inleg) * (1 + monthly_rate)
-                curr_inv += maand_inleg
-                future_vals.append(curr_val)
-                invested_vals.append(curr_inv)
-            
-            final_val = future_vals[-1]
-            total_profit = final_val - invested_vals[-1]
-            
-            st.metric("Eindbedrag na " + str(jaren) + " jaar", f"€ {final_val:,.2f}", delta=f"Winst: € {total_profit:,.2f}")
-            
-            chart_data = pd.DataFrame({
-                "Maand": months,
-                "Portfolio Waarde": future_vals,
-                "Totaal Ingelegd": invested_vals
-            })
-            
-            fig_calc = px.line(chart_data, x="Maand", y=["Portfolio Waarde", "Totaal Ingelegd"])
-            st.plotly_chart(fig_calc, use_container_width=True)
+    else: st.info("Nog geen aandelen.")
 
 # ==================================================
 # TAB 3: WISHLIST
 # ==================================================
 with tabs[2]:
     st.title("❤️ Mijn Wishlist")
-    
-    if not st.session_state['wishlist']:
-        st.info("Je wishlist is leeg.")
-    else:
+    if st.session_state['wishlist']:
         for item in st.session_state['wishlist']:
             with st.container(border=True):
                 c1, c2 = st.columns([4, 1])
-                with c1:
-                    st.subheader(f"{item['name']} ({item['ticker']})")
+                with c1: st.subheader(f"{item['name']} ({item['ticker']})")
                 with c2:
-                    if st.button(f"🔍 Analyseer", key=f"btn_{item['ticker']}"):
+                    if st.button("🔍 Analyseer", key=f"w_{item['ticker']}"):
                         st.session_state['search_query'] = item['ticker']
-                        st.toast(f"Geselecteerd! Ga naar het tabblad 'Analyse'.", icon="🚀")
-                        st.rerun()
-        
-        if st.button("Wishlist Legen"):
+                        st.toast("Ga naar Tabblad Analyse!", icon="🚀")
+        if st.button("Legen"):
             st.session_state['wishlist'] = []
             st.rerun()
+    else: st.info("Leeg.")

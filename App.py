@@ -167,7 +167,7 @@ def calculate_score(m):
     score, total = 0, 0
     opps, risks, neut = [], [], []
     
-    if m.get('peg'):
+    if m['peg']:
         total+=1
         if 0<m['peg']<1.5: score+=1; opps.append(f"PEG ({m['peg']:.2f}) goedkoop.")
         elif m['peg']<0: risks.append("Negatieve PEG.")
@@ -224,10 +224,6 @@ if up:
             st.session_state['wishlist'] = d.get('wishlist', [])
         
         st.sidebar.success("✅ Geladen!")
-        # Forceer refresh zodat de tabellen direct updaten
-        # We gebruiken een button om de refresh te triggeren als de gebruiker dat wil, 
-        # of we vertrouwen erop dat streamlit bij interactie update.
-        # Automatische rerun hier kan soms loops veroorzaken, dus wees voorzichtig.
     except Exception as e: 
         st.sidebar.error(f"Fout: {e}")
 
@@ -281,7 +277,7 @@ with tabs[0]:
                     mt = EU_TO_US_MAP[sel_ticker]
                     mi = yf.Ticker(mt).info
                 # 2. Dynamic Parent Search
-                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio']):
+                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio', 'targetMeanPrice']):
                     sn = safe_get(info, 'shortName', '')
                     us_t = find_primary_ticker(sn)
                     if us_t and us_t != sel_ticker:
@@ -294,7 +290,8 @@ with tabs[0]:
                 # METRICS LOGICA
                 def get_m(y_k, f_k, scrape_k=None, calc=None):
                     # 1. Yahoo API
-                    if safe_get(mi, y_k) is not None: return mi[y_k], "Yahoo"
+                    val = safe_get(mi, y_k)
+                    if val is not None: return val, "Yahoo"
                     # 2. Yahoo Web Scraper (Nieuw!)
                     if scrape_k and scrape.get(scrape_k): return scrape[scrape_k], "Yahoo Web"
                     # 3. Finviz
@@ -322,7 +319,8 @@ with tabs[0]:
                 tgt, tgt_src = get_m('targetMeanPrice', 'target')
                 
                 if tgt:
-                    t_rate = get_currency_rate(safe_get(mi, 'currency', 'USD'), "EUR")
+                    t_curr = safe_get(mi, 'currency', 'USD')
+                    t_rate = get_currency_rate(t_curr, "EUR")
                     tgt_eur = tgt * t_rate
                     upside = f"{((tgt_eur-price_eur)/price_eur)*100:+.1f}%"
                 else: tgt_eur, upside = None, ""
@@ -371,7 +369,7 @@ with tabs[0]:
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     st.title(truncate_text(safe_get(info, 'shortName', sel_ticker)))
-                    st.caption(f"{sel_ticker} | Data: {metrics_ticker}")
+                    st.caption(f"{sel_ticker} | Data: {mt}")
                 with c2: st.metric("Koers", f"€ {price_eur:.2f}")
                 with c3: st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside, help=f"Bron: {tgt_src}")
                 with c4:
@@ -480,6 +478,7 @@ with tabs[1]:
                 t = item['ticker']
                 s = yf.Ticker(t)
                 h = s.history(period="1d")
+                
                 if not h.empty:
                     raw = h['Close'].iloc[-1]
                     curr = safe_get(s.info, 'currency', 'EUR')
@@ -495,7 +494,6 @@ with tabs[1]:
                 sec = safe_get(s.info, 'sector', 'Overig')
                 sec_dist[sec] = sec_dist.get(sec, 0) + val
                 
-                # Div
                 dr = safe_get(s.info, 'dividendRate')
                 if not dr:
                     yd = safe_get(s.info, 'dividendYield')
@@ -523,7 +521,7 @@ with tabs[1]:
         k1, k2, k3 = st.columns(3)
         k1.metric("Waarde", f"€ {total_val:,.2f}")
         k2.metric("Winst", f"€ {prof:,.2f}", delta=f"{(prof/total_inv)*100:.1f}%" if total_inv else "0%")
-        k3.metric("Inleg", f"€ {total_inv:,.2f}")
+        k3.metric("Inleg", f"€ {tot_inv:,.2f}")
         st.divider()
         
         c_pie, c_div = st.columns(2)
@@ -568,7 +566,6 @@ with tabs[2]:
                     pp = h['Close'].iloc[0] * rate
                     pct = ((cp-pp)/pp)*100
                     
-                    # Score lite
                     wi = s.info
                     pe = safe_get(wi, 'trailingPE')
                     g = safe_get(wi, 'earningsGrowth')

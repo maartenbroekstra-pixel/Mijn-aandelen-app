@@ -12,7 +12,6 @@ from datetime import datetime
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
 # --- HULPFUNCTIES ---
-
 @st.cache_data(ttl=3600)
 def get_currency_rate(from_currency, to_currency="EUR"):
     if from_currency == to_currency: return 1.0
@@ -46,38 +45,26 @@ def search_yahoo(query):
         return results
     except: return []
 
-# --- NIEUW: YOUTUBE SCRAPER & PLAYER ---
 @st.cache_data(ttl=3600)
 def get_youtube_video_id(query):
-    """Probeert een video ID te vinden zonder API key"""
     try:
-        # Zoek naar 'stock analysis' video's
         search_query = f"{query} stock analysis {datetime.now().year}"
         url = f"https://www.youtube.com/results?search_query={search_query.replace(' ', '+')}"
-        
-        # We moeten een user-agent meegeven anders blokkeert YT
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=5)
-        
-        # Regex om video ID's te vinden (watch?v=XXXXXXXXXXX)
         video_ids = re.findall(r"watch\?v=(\S{11})", response.text)
-        
-        if video_ids:
-            return video_ids[0] # Retourneer de eerste hit
+        if video_ids: return video_ids[0]
         return None
-    except:
-        return None
+    except: return None
 
-# --- FINVIZ SCRAPER (Verbeterd) ---
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         url = f"https://finviz.com/quote.ashx?t={ticker}"
         r = requests.get(url, headers=headers, timeout=5)
         data = {}
         if r.status_code == 200:
-            # Robuustere parsing
             if 'PEG' in r.text:
                 try: data['peg'] = float(re.search(r'>PEG<.*?<b>([\d\.]+)</b>', r.text, re.DOTALL).group(1))
                 except: pass
@@ -100,8 +87,8 @@ def get_google_news(query):
         for item in root.findall('./channel/item')[:5]:
             title = item.find('title').text
             link = item.find('link').text
-            pubDate = item.find('pubDate').text
             try:
+                pubDate = item.find('pubDate').text
                 dt = datetime.strptime(pubDate[:16], '%a, %d %b %Y')
                 date_str = dt.strftime('%d %b %Y')
             except: date_str = ""
@@ -109,7 +96,6 @@ def get_google_news(query):
         return news_items
     except: return []
 
-# --- NIEUWE SCORE BEREKENING (Met Neutraal) ---
 def calculate_score(metrics):
     score = 0
     total_checks = 0
@@ -123,12 +109,14 @@ def calculate_score(metrics):
         total_checks += 1
         if 0 < peg < 1.5:
             score += 1
-            opportunities.append(f"PEG ({peg:.2f}) wijst op onderwaardering t.o.v. groei.")
-        elif peg > 2.5 or peg < 0:
-            risks.append(f"PEG ({peg:.2f}) is ongunstig (te duur of krimp).")
+            opportunities.append(f"Waardering: Het aandeel is goedkoop ten opzichte van de verwachte winstgroei (PEG: {peg:.2f}).")
+        elif peg < 0:
+            risks.append("Winstgroei: Analisten verwachten krimpende winsten (Negatieve PEG).")
+        elif peg > 2.5:
+            risks.append(f"Waardering: De koers loopt ver vooruit op de daadwerkelijke winstgroei (PEG: {peg:.2f}).")
         else:
             score += 0.5
-            neutral.append(f"PEG ({peg:.2f}) is marktconform.")
+            neutral.append(f"Waardering: De PEG ratio ({peg:.2f}) is marktconform.")
 
     # 2. Forward P/E
     fwd_pe = metrics.get('fwd_pe')
@@ -136,12 +124,12 @@ def calculate_score(metrics):
         total_checks += 1
         if 0 < fwd_pe < 20:
             score += 1
-            opportunities.append(f"Forward P/E ({fwd_pe:.1f}x) is aantrekkelijk.")
+            opportunities.append(f"Toekomst: De verwachte K/W ({fwd_pe:.1f}x) oogt aantrekkelijk.")
         elif fwd_pe > 40:
-            risks.append(f"Forward P/E ({fwd_pe:.1f}x) is erg hoog.")
+            risks.append(f"Verwachting: De markt heeft zeer hoge verwachtingen ingeprijsd (Fwd P/E: {fwd_pe:.1f}x).")
         else:
             score += 0.5
-            neutral.append(f"Forward P/E ({fwd_pe:.1f}x) is redelijk.")
+            neutral.append(f"Toekomst: De verwachte K/W ({fwd_pe:.1f}x) is redelijk.")
 
     # 3. ROE
     roe = metrics.get('roe')
@@ -149,12 +137,12 @@ def calculate_score(metrics):
         total_checks += 1
         if roe > 0.15:
             score += 1
-            opportunities.append(f"Sterke ROE ({roe:.1%}).")
+            opportunities.append(f"Kwaliteit: Het management behaalt een sterk rendement op eigen vermogen ({roe:.1%}).")
         elif roe < 0.05:
-            risks.append(f"Zwakke ROE ({roe:.1%}).")
+            risks.append(f"Kwaliteit: De winstgevendheid is mager (ROE: {roe:.1%}).")
         else:
             score += 0.5
-            neutral.append(f"ROE ({roe:.1%}) is gemiddeld.")
+            neutral.append(f"Kwaliteit: Het rendement ({roe:.1%}) is gemiddeld.")
 
     # 4. Debt/Equity
     de = metrics.get('de')
@@ -162,12 +150,12 @@ def calculate_score(metrics):
         total_checks += 1
         if de < 1.0:
             score += 1
-            opportunities.append("Lage schuldenlast.")
+            opportunities.append("Balans: Het bedrijf is gezond gefinancierd met weinig schulden.")
         elif de > 2.0:
-            risks.append(f"Hoge schulden (D/E: {de:.2f}).")
+            risks.append(f"Risico: Het bedrijf heeft een hoge schuldenlast (D/E: {de:.2f}).")
         else:
             score += 0.5
-            neutral.append(f"Schuldenlast (D/E: {de:.2f}) is acceptabel.")
+            neutral.append("Balans: De schuldenlast is acceptabel.")
 
     # 5. Current Ratio
     cr = metrics.get('cr')
@@ -175,12 +163,12 @@ def calculate_score(metrics):
         total_checks += 1
         if cr > 1.5:
             score += 1
-            opportunities.append("Goede liquiditeit.")
+            opportunities.append("Liquiditeit: Er is voldoende cash buffer voor korte termijn verplichtingen.")
         elif cr < 1.0:
-            risks.append("Krap bij kas (Current Ratio < 1).")
+            risks.append("Liquiditeit: Het bedrijf zit krap bij kas om rekeningen op korte termijn te betalen.")
         else:
             score += 0.5
-            neutral.append("Liquiditeit is voldoende.")
+            neutral.append("Liquiditeit: De cashpositie is voldoende.")
 
     # 6. P/B
     pb = metrics.get('pb')
@@ -188,12 +176,12 @@ def calculate_score(metrics):
         total_checks += 1
         if 0 < pb < 3.0:
             score += 1
-            opportunities.append("Redelijke prijs t.o.v. boekwaarde.")
+            opportunities.append("Waarde: De koers ligt relatief dicht bij de boekwaarde van de bezittingen.")
         elif pb > 10:
-            risks.append(f"Hoge P/B ({pb:.2f}).")
+            risks.append("Substantie: Je betaalt een hoge premie voor 'lucht' bovenop de boekwaarde.")
         else:
             score += 0.5
-            neutral.append(f"P/B ({pb:.2f}) is normaal voor de sector.")
+            neutral.append(f"Waarde: De P/B ratio ({pb:.2f}) is normaal voor deze sector.")
 
     final_score = (score / total_checks) * 10 if total_checks > 0 else 5.0
     return final_score, opportunities, risks, neutral
@@ -203,19 +191,16 @@ if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 def save_portfolio_json(): return json.dumps(st.session_state['portfolio'])
 def load_portfolio_json(uploaded_file):
     if uploaded_file:
-        try:
-            st.session_state['portfolio'] = json.load(uploaded_file)
-            st.success("✅ Portfolio geladen!")
+        try: st.session_state['portfolio'] = json.load(uploaded_file); st.success("✅ Portfolio geladen!")
         except: st.error("❌ Fout bestand.")
 
 # --- ZIJBALK ---
 st.sidebar.header("💾 Data Opslag")
-json_data = save_portfolio_json()
-st.sidebar.download_button("⬇️ Download", json_data, "portfolio.json", "application/json")
-uploaded_file = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
-if uploaded_file: load_portfolio_json(uploaded_file)
+st.sidebar.download_button("⬇️ Download", save_portfolio_json(), "portfolio.json", "application/json")
+uploaded = st.sidebar.file_uploader("⬆️ Upload", type=['json'])
+if uploaded: load_portfolio_json(uploaded)
 st.sidebar.markdown("---")
-st.sidebar.info("Tip: Zoek aandelen in het hoofdscherm.")
+st.sidebar.info("Tip: Gebruik de zoekbalk linksboven in het hoofdscherm.")
 
 # --- TABBLADEN ---
 tabs = st.tabs(["🔎 Analyse & Nieuws", "📊 Mijn Portfolio"])
@@ -226,7 +211,7 @@ tabs = st.tabs(["🔎 Analyse & Nieuws", "📊 Mijn Portfolio"])
 with tabs[0]:
     col_search, col_period = st.columns([3, 1])
     with col_search:
-        search_text = st.text_input("🔍 Zoek Aandeel:", placeholder="Bijv. Salesforce, Shell...")
+        search_text = st.text_input("🔍 Zoek Aandeel:", placeholder="Bijv. ASML, Salesforce...")
         selected_ticker = None
         if search_text:
             results = search_yahoo(search_text)
@@ -249,17 +234,32 @@ with tabs[0]:
                 curr = safe_get(info, 'currency', 'EUR')
                 eur_rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * eur_rate
-                
                 finviz_data = get_finviz_data(selected_ticker)
 
+                # --- KOERSDOEL LOGICA ---
+                tgt = safe_get(info, 'targetMeanPrice')
+                if tgt is None and 'target' in finviz_data: tgt = finviz_data['target']
+                
+                tgt_eur = tgt * eur_rate if tgt else None
+                upside_txt = ""
+                tgt_color = "normal"
+                if tgt_eur:
+                    upside = ((tgt_eur - price_eur) / price_eur) * 100
+                    upside_txt = f"{'+' if upside > 0 else ''}{upside:.1f}%"
+                    tgt_color = "normal" if upside < 0 else "inverse" # Groen als er upside is
+
+                # --- HEADER ---
                 st.markdown("---")
-                c1, c2, c3 = st.columns([2, 1, 1])
+                c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
                     st.title(safe_get(info, 'shortName', selected_ticker))
                     st.caption(f"{selected_ticker} | {safe_get(info, 'exchange', '-')}")
                 with c2:
-                    st.metric("Koers (EUR)", f"€ {price_eur:.2f}")
+                    st.metric("Huidige Koers", f"€ {price_eur:.2f}")
                 with c3:
+                    # Koersdoel hier tonen
+                    st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside_txt if tgt_eur else None)
+                with c4:
                     with st.popover("➕ Toevoegen"):
                         with st.form("add"):
                             amt = st.number_input("Aantal", min_value=0.0, value=1.0)
@@ -268,40 +268,33 @@ with tabs[0]:
                                 st.session_state['portfolio'].append({"ticker": selected_ticker, "amount": amt, "avg_price_eur": price})
                                 st.toast("Opgeslagen!", icon="✅")
 
-                # METRICS
+                # --- METRICS VERZAMELEN ---
                 pe = safe_get(info, 'trailingPE')
                 fwd_pe = safe_get(info, 'forwardPE')
                 
-                # PEG LOGICA (Yahoo -> Finviz -> Schatting)
                 peg = safe_get(info, 'pegRatio')
                 peg_source = "Yahoo"
                 if peg is None and 'peg' in finviz_data:
-                    peg = finviz_data['peg']
-                    peg_source = "Finviz"
+                    peg = finviz_data['peg']; peg_source = "Finviz"
                 if peg is None and pe:
                     growth = safe_get(info, 'earningsGrowth') 
-                    if growth:
-                        peg = pe / (growth * 100)
-                        peg_source = "Schatting (PE/Growth)"
+                    if growth: peg = pe / (growth * 100); peg_source = "Schatting"
                 
                 div_yield = safe_get(info, 'dividendYield')
                 if div_yield is None:
                     div_rate = safe_get(info, 'dividendRate')
-                    orig_price = hist['Close'].iloc[-1]
-                    if div_rate and orig_price > 0: div_yield = div_rate / orig_price
-                    else: div_yield = 0.0
-                if div_yield > 0.5: div_yield = div_yield / 100
-
+                    if div_rate: div_yield = div_rate / hist['Close'].iloc[-1]
+                if div_yield and div_yield > 0.5: div_yield = div_yield / 100
+                
                 pb = safe_get(info, 'priceToBook')
                 if pb is None and 'pb' in finviz_data: pb = finviz_data['pb']
                 
-                de = safe_get(info, 'debtToEquity')
-                de_ratio = de / 100 if de else None
+                de_ratio = safe_get(info, 'debtToEquity')
+                if de_ratio: de_ratio = de_ratio / 100
+                
                 cr = safe_get(info, 'currentRatio')
                 
-                tgt = safe_get(info, 'targetMeanPrice')
-                if tgt is None and 'target' in finviz_data: tgt = finviz_data['target']
-                
+                # RSI
                 delta = hist['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -309,63 +302,105 @@ with tabs[0]:
                 rsi = 100 - (100 / (1 + rs))
                 rsi_val = rsi.iloc[-1] if not rsi.empty else 50
                 
-                # SCORE & ADVIES
+                beta = safe_get(info, 'beta')
+
+                # --- FUNDAMENTELE ANALYSE & AI ---
                 metrics_dict = {'peg': peg, 'roe': safe_get(info, 'returnOnEquity'), 'de': de_ratio, 'cr': cr, 'fwd_pe': fwd_pe, 'pb': pb}
                 score, opps, risks, neutral = calculate_score(metrics_dict)
                 
-                st.markdown("### 🤖 AI Oordeel")
-                sc_c1, sc_c2 = st.columns([1, 3])
-                with sc_c1:
-                    color = "green" if score >= 7 else ("orange" if score >= 5.5 else "red")
-                    # CSS Flexbox fix voor perfecte centrering
-                    st.markdown(f"""
-                    <div style="display: flex; justify-content: center; align-items: center; height: 100%;">
-                        <div style="display: flex; justify-content: center; align-items: center; border: 5px solid {color}; width: 100px; height: 100px; border-radius: 50%;">
-                            <h1 style="margin:0; padding:0; color:{color}; font-size: 2.5rem;">{score:.1f}</h1>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                st.markdown("### 🧬 Fundamentele Analyse & AI Oordeel")
                 
-                with sc_c2:
-                    c_k, c_r, c_n = st.columns(3)
-                    with c_k:
-                        if opps:
-                            st.success("**✅ Kansen**")
-                            for o in opps: st.write(f"- {o}")
-                        else: st.write("Geen sterke uitschieters.")
-                    with c_r:
-                        if risks:
-                            st.error("**⚠️ Risico's**")
-                            for r in risks: st.write(f"- {r}")
-                        else: st.write("Geen zware risico's.")
-                    with c_n:
-                        if neutral:
-                            st.info("**⚪ Neutraal**")
-                            for n in neutral: st.write(f"- {n}")
+                # Container voor nette styling
+                with st.container(border=True):
+                    col_score, col_txt = st.columns([1, 4])
+                    
+                    with col_score:
+                        color = "green" if score >= 7 else ("orange" if score >= 5.5 else "red")
+                        # Flexbox centrering voor de cirkel
+                        st.markdown(f"""
+                        <div style="display: flex; justify-content: center; align-items: center; height: 100%;">
+                            <div style="display: flex; justify-content: center; align-items: center; border: 6px solid {color}; width: 120px; height: 120px; border-radius: 50%;">
+                                <h1 style="margin:0; padding:0; color:{color}; font-size: 3rem;">{score:.1f}</h1>
+                            </div>
+                        </div>
+                        <p style="text-align:center; margin-top: 10px;"><b>AI Score</b></p>
+                        """, unsafe_allow_html=True)
+                    
+                    with col_txt:
+                        if not opps and not risks and not neutral:
+                            st.info("Onvoldoende data beschikbaar voor een AI oordeel.")
+                        else:
+                            # Samenvatting in kolommen
+                            c_plus, c_min, c_neut = st.columns(3)
+                            with c_plus:
+                                if opps:
+                                    st.success("**✅ Sterke Punten**")
+                                    for o in opps: st.write(f"- {o}")
+                                else: st.write("Geen uitgesproken sterke punten.")
+                            with c_min:
+                                if risks:
+                                    st.error("**⚠️ Aandachtspunten**")
+                                    for r in risks: st.write(f"- {r}")
+                                else: st.write("Geen grote risico's gedetecteerd.")
+                            with c_neut:
+                                if neutral:
+                                    st.info("**⚪ Neutraal / Normaal**")
+                                    for n in neutral: st.write(f"- {n}")
 
                 st.divider()
-                st.subheader("📊 Ratio's")
+
+                # --- METRICS GRID (Met Tooltips & Kleuren) ---
+                st.subheader("📊 Financiële Ratio's")
+                
                 m1, m2, m3, m4, m5, m6 = st.columns(6)
+                
                 with m1:
                     val = peg if peg else 0
-                    color = "🟢" if 0 < val < 1.5 else ("🟠" if val < 0 else "🟡")
-                    st.metric("PEG Ratio", f"{color} {val:.2f}" if peg else "N/A", help=f"Bron: {peg_source}")
-                with m2: st.metric("Forward P/E", f"{'🟢' if fwd_pe and fwd_pe<20 else '🟡'} {fwd_pe:.1f}" if fwd_pe else "N/A")
-                with m3: st.metric("Current Ratio", f"{'🟢' if cr and cr>1.2 else '🟠'} {cr:.2f}" if cr else "N/A")
-                with m4: st.metric("Debt/Equity", f"{'🟢' if de_ratio and de_ratio<1.2 else '🟠'} {de_ratio:.2f}" if de_ratio else "N/A")
-                with m5: st.metric("P/B Ratio", f"{'🟢' if pb and pb<3 else '⚪'} {pb:.2f}" if pb else "N/A")
+                    c = "🟢" if 0 < val < 1.5 else ("🟠" if val < 0 else "🟡")
+                    st.metric("PEG Ratio", f"{c} {val:.2f}" if peg else "N/A", help=f"Bron: {peg_source}.\n\nPrijs t.o.v. Groei. < 1.5 is vaak koopwaardig voor groeibedrijven. Negatief betekent krimp.")
+                with m2:
+                    val = fwd_pe if fwd_pe else 0
+                    st.metric("Forward P/E", f"{'🟢' if 0<val<20 else '🟡'} {val:.1f}" if fwd_pe else "N/A", help="Verwachte K/W voor komend jaar.\n\n< 20 is vaak aantrekkelijk. > 30 is duur (hoge verwachtingen).")
+                with m3:
+                    val = cr if cr else 0
+                    st.metric("Current Ratio", f"{'🟢' if val>1.5 else '🟠'} {val:.2f}" if cr else "N/A", help="Liquiditeit.\n\n> 1.5 betekent dat er genoeg geld is om korte termijn rekeningen te betalen.")
+                with m4:
+                    val = de_ratio if de_ratio else 0
+                    st.metric("Debt/Equity", f"{'🟢' if val<1 else '🟠'} {val:.2f}" if de_ratio else "N/A", help="Schuldgraad.\n\n< 1.0 is gezond. > 2.0 betekent veel schulden.")
+                with m5:
+                    val = pb if pb else 0
+                    st.metric("P/B Ratio", f"{'🟢' if val<3 else '⚪'} {val:.2f}" if pb else "N/A", help="Prijs / Boekwaarde.\n\n< 1.0 is goedkoop (onder boekwaarde). Bij tech/software vaak hoger.")
                 with m6: 
                     roe = safe_get(info, 'returnOnEquity', 0)
-                    st.metric("ROE", f"{'🟢' if roe>0.15 else '🟡'} {roe:.1%}")
+                    st.metric("ROE", f"{'🟢' if roe>0.15 else '🟡'} {roe:.1%}", help="Rendement op Eigen Vermogen.\n\n> 15% duidt op een sterk bedrijf met competitief voordeel.")
 
                 st.write("")
                 x1, x2, x3, x4 = st.columns(4)
-                with x1: st.metric("Dividend", f"{div_yield:.2%}")
-                with x2: st.metric("RSI (14)", f"{'🟢' if rsi_val<30 else '⚪'} {rsi_val:.0f}")
-                with x3: st.metric("Beta", f"{safe_get(info, 'beta', 1.0):.2f}")
-                with x4: st.metric("Koersdoel", f"€ {tgt*eur_rate:.2f}" if tgt else "N/A")
+                
+                with x1:
+                    dy = div_yield if div_yield else 0
+                    # Kleurcode Dividend
+                    if dy > 0.03: c = "🟢" # Hoog
+                    elif dy > 0.015: c = "🔵" # Gemiddeld
+                    else: c = "⚪" # Laag/Geen
+                    st.metric("Dividend", f"{c} {dy:.2%}", help="Dividend Rendement (Jaarlijks).\n\n> 3% is aantrekkelijk voor inkomen. Laag is normaal voor snelle groeiers.")
+                
+                with x2: 
+                    st.metric("RSI (14)", f"{'🟢' if rsi_val<30 else '⚪'} {rsi_val:.0f}", help="Momentum Indicator.\n\n< 30: Oversold (Potentieel bodem/koopkans).\n> 70: Overbought (Misschien te duur).")
+                
+                with x3: 
+                    b = beta if beta else 1.0
+                    # Kleurcode Beta
+                    if b < 0.8: c = "🟢" # Defensief
+                    elif b < 1.2: c = "⚪" # Markt
+                    elif b < 1.8: c = "🟠" # Volatiel
+                    else: c = "🔴" # Zeer volatiel
+                    st.metric("Beta", f"{c} {b:.2f}", help="Volatiliteit t.o.v. de markt.\n\n1.0 = Beweegt met markt mee.\n< 1.0 = Stabiel/Defensief.\n> 1.5 = Wild/Risicovol.")
+                
+                with x4: 
+                     st.metric("Winstmarge", f"{safe_get(info, 'profitMargins', 0):.1%}", help="Nettowinst als percentage van de omzet.")
 
-                st.markdown("### 📈 Koers")
+                st.markdown("### 📈 Koersverloop")
                 fig = go.Figure()
                 col = '#00C805' if hist['Close'].iloc[-1] >= hist['Close'].iloc[0] else '#FF5000'
                 fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], mode='lines', line=dict(color=col)))
@@ -389,7 +424,7 @@ with tabs[0]:
                     video_id = get_youtube_video_id(comp)
                     
                     if video_id:
-                        st.success(f"Video gevonden: {comp} Analysis")
+                        st.success(f"Gevonden: {comp} Analysis")
                         st.video(f"https://www.youtube.com/watch?v={video_id}")
                     else:
                         st.warning("Geen directe video gevonden.")

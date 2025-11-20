@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import requests
 import json
 import re
@@ -36,7 +35,7 @@ EU_TO_US_MAP = {
     "INGA.AS": "ING",                        # ING
     "MT.AS": "MT",                           # ArcelorMittal
     "DSM.AS": "DSM",                         # DSM
-    "2PP.DE": "PYPL"                         # Paypal Xetra -> US
+    "2PP.DE": "PYPL"                         # Paypal Xetra
 }
 
 # --- TOOLTIPS ---
@@ -201,37 +200,54 @@ def calculate_score(metrics):
     final = (score / total) * 10 if total > 0 else 5.0
     return final, opps, risks, neut
 
+# --- FILE MANAGER (FIXED) ---
+def load_file_callback():
+    """Callback die alleen runt bij upload event"""
+    uploaded_file = st.session_state.get('uploader')
+    if uploaded_file is not None:
+        try:
+            uploaded_file.seek(0)
+            d = json.load(uploaded_file)
+            
+            if isinstance(d, list): 
+                st.session_state['portfolio'] = d
+                st.session_state['wishlist'] = []
+            elif isinstance(d, dict):
+                st.session_state['portfolio'] = d.get('portfolio', [])
+                st.session_state['wishlist'] = d.get('wishlist', [])
+                
+            st.toast(f"Data geladen! ({len(st.session_state['portfolio'])} aandelen)", icon="💾")
+        except Exception as e:
+            st.error(f"Fout bij laden: {e}")
+
+def get_download_json():
+    # Genereer de string vers op het moment van klikken
+    return json.dumps({
+        'portfolio': st.session_state['portfolio'], 
+        'wishlist': st.session_state['wishlist']
+    })
+
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data Beheer")
 
-# Download Data
-# We genereren de JSON string *binnen* de button parameter, zodat hij de allerlaatste state pakt
+# Download
 st.sidebar.download_button(
     label="⬇️ Download Data",
-    data=json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']}),
+    data=get_download_json(), # Functie-aanroep voor verse data
     file_name="aandelen_data.json",
     mime="application/json"
 )
 
-# Upload Data
-uploaded_file = st.sidebar.file_uploader("⬆️ Upload Data", type=['json'])
-if uploaded_file:
-    try:
-        uploaded_file.seek(0)
-        data = json.load(uploaded_file)
-        
-        if isinstance(data, list):
-            st.session_state['portfolio'] = data
-        elif isinstance(data, dict):
-            st.session_state['portfolio'] = data.get('portfolio', [])
-            st.session_state['wishlist'] = data.get('wishlist', [])
-        
-        st.sidebar.success(f"✅ Geladen! ({len(st.session_state['portfolio'])} aandelen)")
-    except Exception as e:
-        st.sidebar.error(f"Fout: {e}")
+# Upload
+st.sidebar.file_uploader(
+    "⬆️ Upload Data", 
+    type=['json'], 
+    key='uploader',
+    on_change=load_file_callback # Cruciaal: Alleen runnen bij verandering
+)
 
 st.sidebar.divider()
-st.sidebar.info("Tip: Gebruik .AS of .DE voor Europese noteringen.")
+st.sidebar.info("Tip: .AS (Amsterdam) en .DE (Xetra) staan bovenaan.")
 
 if st.sidebar.button("🔄 Cache Legen"):
     st.cache_data.clear()
@@ -274,16 +290,13 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
-                # SMART DATA FETCH
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # 1. Mapping Check
+                # Smart Data Logic
                 if sel_ticker in EU_TO_US_MAP:
                     metrics_ticker = EU_TO_US_MAP[sel_ticker]
                     metrics_info = yf.Ticker(metrics_ticker).info
-                
-                # 2. Dynamic Check
                 elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio', 'targetMeanPrice']):
                     short_name = safe_get(info, 'shortName', '')
                     us_ticker = find_primary_ticker(short_name)
@@ -293,7 +306,6 @@ with tabs[0]:
 
                 fin = get_finviz_data(metrics_ticker)
 
-                # METRICS HELPER
                 def get_val(y_key, f_key, fallback_calc=None):
                     v = safe_get(metrics_info, y_key)
                     if v is not None: return v, "Yahoo"
@@ -303,17 +315,16 @@ with tabs[0]:
                         if c is not None: return c, "Berekend"
                     return None, "N/A"
 
-                # PEG CALC
                 def calc_peg():
                     p = safe_get(metrics_info, 'trailingPE') or safe_get(metrics_info, 'forwardPE')
                     g = safe_get(metrics_info, 'earningsGrowth')
                     if not g: g = safe_get(metrics_info, 'revenueGrowth')
                     return p/(g*100) if p and g else None
-                peg, peg_src = get_val('pegRatio', 'peg', calc_peg)
 
+                peg, peg_src = get_val('pegRatio', 'peg', calc_peg)
                 fwd_pe, fwd_src = get_val('forwardPE', 'fwd_pe')
                 pb, pb_src = get_val('priceToBook', 'pb')
-
+                
                 tgt, tgt_src = get_val('targetMeanPrice', 'target')
                 if tgt:
                     t_curr = safe_get(metrics_info, 'currency', 'USD')
@@ -366,7 +377,6 @@ with tabs[0]:
                                 if st.form_submit_button("Opslaan"):
                                     st.session_state['portfolio'].append({"ticker": sel_ticker, "amount": a, "avg_price_eur": p})
                                     st.toast("Toegevoegd!", icon="✅")
-                                    st.rerun()
                         with tw:
                             if st.button("Zet op Wishlist"):
                                 exists = any(x['ticker'] == sel_ticker for x in st.session_state['wishlist'])
@@ -518,8 +528,8 @@ with tabs[1]:
         k1.metric("Waarde", f"€ {tot_val:,.2f}")
         k2.metric("Winst/Verlies", f"€ {tres:,.2f}", delta=f"{(tres/tot_inv)*100:.1f}%" if tot_inv>0 else "0%")
         k3.metric("Inleg", f"€ {tot_inv:,.2f}")
-        
         st.divider()
+        
         c_sec, c_div = st.columns(2)
         with c_sec:
             st.subheader("Sectoren")
@@ -574,18 +584,18 @@ with tabs[2]:
         for item in st.session_state['wishlist']:
             ticker = item['ticker']
             try:
-                # SNELLE DATA FETCH VOOR WISHLIST
+                # SNELLE DATA VOOR WISHLIST
                 ws = yf.Ticker(ticker)
                 wh = ws.history(period="2d")
+                curr = safe_get(ws.info, 'currency', 'EUR')
+                rate = get_currency_rate(curr, "EUR")
                 
                 if not wh.empty:
-                    curr = safe_get(ws.info, 'currency', 'EUR')
-                    rate = get_currency_rate(curr, "EUR")
-                    cp = wh['Close'].iloc[-1] * rate
-                    pp = wh['Close'].iloc[0] * rate
-                    pct = ((cp-pp)/pp)*100
+                    curr_price = wh['Close'].iloc[-1] * rate
+                    prev_price = wh['Close'].iloc[0] * rate
+                    change_pct = ((curr_price - prev_price) / prev_price) * 100
                     
-                    # Score calc (alleen Yahoo voor snelheid)
+                    # Basic Score (Yahoo only for speed)
                     wi = ws.info
                     wpeg = safe_get(wi, 'pegRatio')
                     if wpeg is None:
@@ -597,17 +607,19 @@ with tabs[2]:
                     if wd['de']: wd['de'] /= 100
                     wsc, _, _, _ = calculate_score(wd)
                     scol = "green" if wsc>=7 else ("orange" if wsc>=5.5 else "red")
-                else: cp=0; pct=0; wsc=0; scol="gray"
-            except: cp=0; pct=0; wsc=0; scol="gray"
+                else:
+                    curr_price = 0; change_pct = 0; wsc = 0; scol = "gray"
+            except:
+                curr_price = 0; change_pct = 0; wsc = 0; scol = "gray"
 
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
-            with c1: st.write(f"**{item['name']}** ({ticker})")
+            c1, c2, c3, c4 = st.columns([4, 3, 2, 1])
+            with c1: st.write(f"**{item['name']}**\n<span style='color:gray;font-size:0.8em'>{ticker}</span>", unsafe_allow_html=True)
             with c2: 
-                st.write(f"€ {cp:.2f}")
-                st.caption(f":{'green' if pct>=0 else 'red'}[{pct:+.1f}%]")
-            with c3: st.markdown(f"AI: :{scol}[{wsc:.1f}]")
+                col_txt = "green" if change_pct >= 0 else "red"
+                st.write(f"€ {curr_price:.2f}\n<span style='color:{col_txt}'>{change_pct:+.1f}%</span>", unsafe_allow_html=True)
+            with c3: st.write(f"AI: :{scol}[{wsc:.1f}]")
             with c4:
-                if st.button("🔎", key=f"w_{ticker}"):
+                if st.button("🔎", key=f"wl_{ticker}"):
                     st.session_state['search_query'] = ticker
                     st.toast("Zie Analyse!", icon="🚀")
             st.divider()

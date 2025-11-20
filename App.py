@@ -35,9 +35,7 @@ def safe_get(info_dict, key, default=None):
     return val if val is not None else default
 
 def truncate_text(text, max_len=25):
-    """Kort lange namen af"""
-    if text and len(text) > max_len:
-        return text[:max_len] + "..."
+    if text and len(text) > max_len: return text[:max_len] + "..."
     return text
 
 def search_yahoo(query):
@@ -70,20 +68,25 @@ def get_youtube_video_id(query):
 
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
+    """Haalt data van Finviz (Back-up voor Yahoo)"""
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         url = f"https://finviz.com/quote.ashx?t={ticker}"
         r = requests.get(url, headers=headers, timeout=5)
         data = {}
         if r.status_code == 200:
+            # Flexibele regex voor als er spaties zijn
             if 'PEG' in r.text:
-                try: data['peg'] = float(re.search(r'>PEG<.*?<b>([\d\.]+)</b>', r.text, re.DOTALL).group(1))
+                try: data['peg'] = float(re.search(r'>PEG<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
                 except: pass
             if 'P/B' in r.text:
-                try: data['pb'] = float(re.search(r'>P/B<.*?<b>([\d\.]+)</b>', r.text, re.DOTALL).group(1))
+                try: data['pb'] = float(re.search(r'>P/B<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
                 except: pass
             if 'Target Price' in r.text:
-                try: data['target'] = float(re.search(r'>Target Price<.*?<b>([\d\.]+)</b>', r.text, re.DOTALL).group(1))
+                try: data['target'] = float(re.search(r'>Target Price<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
+                except: pass
+            if 'Forward P/E' in r.text:
+                try: data['fwd_pe'] = float(re.search(r'>Forward P/E<.*?<b>\s*([\d\.]+)\s*</b>', r.text, re.DOTALL).group(1))
                 except: pass
         return data
     except: return {}
@@ -209,11 +212,10 @@ def load_data(uploaded_file):
     if uploaded_file:
         try:
             data = json.load(uploaded_file)
-            # Backwards compatibility check (als het oude bestand alleen een list was)
-            if isinstance(data, list):
+            if isinstance(data, list): # Oude structuur
                 st.session_state['portfolio'] = data
                 st.session_state['wishlist'] = []
-            else:
+            else: # Nieuwe structuur
                 st.session_state['portfolio'] = data.get('portfolio', [])
                 st.session_state['wishlist'] = data.get('wishlist', [])
             st.success("✅ Data geladen!")
@@ -221,7 +223,7 @@ def load_data(uploaded_file):
 
 # --- ZIJBALK ---
 st.sidebar.header("💾 Opslag")
-st.sidebar.download_button("⬇️ Download Data", save_data(), "aandelen_data.json", "application/json")
+st.sidebar.download_button("⬇️ Download Data (Alles)", save_data(), "aandelen_data.json", "application/json")
 uploaded = st.sidebar.file_uploader("⬆️ Upload Data", type=['json'])
 if uploaded: load_data(uploaded)
 st.sidebar.markdown("---")
@@ -236,12 +238,10 @@ tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
 with tabs[0]:
     col_search, col_period = st.columns([3, 1])
     with col_search:
-        # Als we vanuit wishlist komen, vullen we de waarde in
         default_search = st.session_state.get('search_query', "")
-        search_text = st.text_input("🔍 Zoek Aandeel:", value=default_search, placeholder="Bijv. ASML, Salesforce...", key="search_input")
+        search_text = st.text_input("🔍 Zoek Aandeel:", value=default_search, placeholder="Bijv. PDD, Salesforce...", key="search_input")
         
         selected_ticker = None
-        # Als de input een volledige ticker lijkt (bijv via wishlist click), gebruik direct
         if search_text and "." in search_text and " " not in search_text: 
              selected_ticker = search_text
         elif search_text:
@@ -250,7 +250,6 @@ with tabs[0]:
                 choice = st.selectbox("Kies bedrijf:", results)
                 selected_ticker = choice.split(" | ")[0]
             else: 
-                # Fallback: probeer de tekst als ticker te gebruiken
                 selected_ticker = search_text.upper()
     
     with col_period:
@@ -268,6 +267,8 @@ with tabs[0]:
                 curr = safe_get(info, 'currency', 'EUR')
                 eur_rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * eur_rate
+                
+                # Haal Finviz data op (Back-up)
                 finviz_data = get_finviz_data(selected_ticker)
 
                 # Koersdoel
@@ -283,7 +284,6 @@ with tabs[0]:
                 st.markdown("---")
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1:
-                    # Lange namen afkorten
                     full_name = safe_get(info, 'shortName', selected_ticker)
                     st.title(truncate_text(full_name, 25))
                     st.caption(f"{selected_ticker} | {safe_get(info, 'exchange', '-')}")
@@ -292,7 +292,6 @@ with tabs[0]:
                 with c3:
                     st.metric("Koersdoel", f"€ {tgt_eur:.2f}" if tgt_eur else "N/A", delta=upside_txt if tgt_eur else None)
                 with c4:
-                    # Knoppen voor Portfolio en Wishlist
                     with st.popover("➕ Toevoegen"):
                         tab_p, tab_w = st.tabs(["Portfolio", "Wishlist"])
                         with tab_p:
@@ -304,33 +303,42 @@ with tabs[0]:
                                     st.toast("Toegevoegd aan Portfolio!", icon="✅")
                         with tab_w:
                             if st.button("Zet op Wishlist"):
-                                # Check dubbelingen
                                 if selected_ticker not in [x['ticker'] for x in st.session_state['wishlist']]:
                                     st.session_state['wishlist'].append({"ticker": selected_ticker, "name": full_name})
                                     st.toast("Toegevoegd aan Wishlist!", icon="❤️")
-                                else:
-                                    st.toast("Staat al op wishlist", icon="⚠️")
+                                else: st.toast("Staat al op wishlist", icon="⚠️")
 
-                # METRICS
+                # METRICS LOGICA (Met sterke fallbacks voor PDD e.d.)
                 pe = safe_get(info, 'trailingPE')
                 fwd_pe = safe_get(info, 'forwardPE')
+                if fwd_pe is None and 'fwd_pe' in finviz_data: fwd_pe = finviz_data['fwd_pe']
                 
+                # PEG
                 peg = safe_get(info, 'pegRatio')
                 peg_src = "Yahoo"
-                if peg is None and 'peg' in finviz_data: peg = finviz_data['peg']; peg_src = "Finviz"
-                if peg is None and pe:
-                    growth = safe_get(info, 'earningsGrowth') 
-                    if growth: peg = pe / (growth * 100); peg_src = "Schatting"
-                
+                if peg is None and 'peg' in finviz_data: 
+                    peg = finviz_data['peg']
+                    peg_src = "Finviz"
+                if peg is None:
+                    # Fallback: Gebruik Fwd PE als Trailing PE mist
+                    base_pe = pe if pe else fwd_pe
+                    growth = safe_get(info, 'earningsGrowth')
+                    if base_pe and growth: 
+                        peg = base_pe / (growth * 100)
+                        peg_src = "Schatting"
+
+                # Dividend
                 div_yield = safe_get(info, 'dividendYield')
                 if div_yield is None:
                     div_rate = safe_get(info, 'dividendRate')
                     if div_rate: div_yield = div_rate / hist['Close'].iloc[-1]
                 if div_yield and div_yield > 0.5: div_yield = div_yield / 100
                 
+                # P/B
                 pb = safe_get(info, 'priceToBook')
                 if pb is None and 'pb' in finviz_data: pb = finviz_data['pb']
                 
+                # Debt/Equity
                 de_ratio = safe_get(info, 'debtToEquity')
                 if de_ratio: de_ratio = de_ratio / 100
                 
@@ -338,6 +346,7 @@ with tabs[0]:
                 beta = safe_get(info, 'beta')
                 margin = safe_get(info, 'profitMargins')
 
+                # RSI
                 delta = hist['Close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -354,7 +363,7 @@ with tabs[0]:
                     col_score, col_txt = st.columns([1, 4])
                     with col_score:
                         color = "green" if score >= 7 else ("orange" if score >= 5.5 else "red")
-                        # Verbeterde CSS voor perfecte centrering
+                        # FIX: GEEN LINK ICOON DOOR SPAN TE GEBRUIKEN
                         st.markdown(f"""
                         <div style="display: flex; justify-content: center; align-items: center; width: 100%; height: 100%;">
                             <div style="
@@ -365,17 +374,17 @@ with tabs[0]:
                                 width: 110px; 
                                 height: 110px; 
                                 border-radius: 50%;
-                                line-height: 110px;
+                                background-color: transparent;
                                 box-sizing: border-box;">
-                                <h1 style="margin: 0; padding: 0; color:{color}; font-size: 2.8rem; line-height: 1;">{score:.1f}</h1>
+                                <span style="margin: 0; padding: 0; color:{color}; font-size: 2.8rem; font-weight: bold; line-height: 1;">{score:.1f}</span>
                             </div>
                         </div>
-                        <p style="text-align:center; margin-top:5px;"><b>AI Score</b></p>
+                        <p style="text-align:center; margin-top:5px; font-weight:bold;">AI Score</p>
                         """, unsafe_allow_html=True)
                     
                     with col_txt:
                         if not opps and not risks and not neutral:
-                            st.info("Onvoldoende data.")
+                            st.info("Onvoldoende data voor analyse.")
                         else:
                             c_plus, c_min, c_neut = st.columns(3)
                             with c_plus:
@@ -440,7 +449,6 @@ with tabs[0]:
                 fig.update_layout(template="plotly_dark", margin=dict(t=10,b=0,l=0,r=0), height=350)
                 st.plotly_chart(fig, use_container_width=True)
 
-                # MEDIA SECTIE
                 c_news, c_vid = st.columns(2)
                 with c_news:
                     st.markdown("### 📰 Nieuws")
@@ -457,11 +465,9 @@ with tabs[0]:
                     comp = safe_get(info, 'shortName', selected_ticker)
                     video_id = get_youtube_video_id(comp)
                     
-                    # Video Speler
                     if video_id:
                         st.video(f"https://www.youtube.com/watch?v={video_id}")
                     
-                    # Zoekknop altijd tonen
                     yt_url = f"https://www.youtube.com/results?search_query={comp}+stock+analysis+{datetime.now().year}"
                     st.markdown(f"👉 **[Zoek handmatig op YouTube]({yt_url})**")
 
@@ -532,19 +538,15 @@ with tabs[2]:
         st.info("Je wishlist is leeg. Zoek een aandeel bij 'Analyse' en voeg het toe!")
     else:
         for item in st.session_state['wishlist']:
-            # Maak een mooie kaart per aandeel
             with st.container(border=True):
                 c1, c2 = st.columns([4, 1])
                 with c1:
                     st.subheader(f"{item['name']} ({item['ticker']})")
                 with c2:
-                    # Knop om te analyseren
                     if st.button(f"🔍 Analyseer", key=f"btn_{item['ticker']}"):
-                        # Update de zoekbalk state
                         st.session_state['search_query'] = item['ticker']
-                        # Helaas kan Streamlit niet automatisch van tab wisselen, dus we geven een melding
                         st.toast(f"Geselecteerd! Ga naar het tabblad 'Analyse'.", icon="🚀")
-                        st.rerun() # Ververs pagina zodat search_query in Tab 1 wordt opgepakt
+                        st.rerun()
         
         if st.button("Wishlist Legen"):
             st.session_state['wishlist'] = []

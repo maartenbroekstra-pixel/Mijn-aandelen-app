@@ -33,6 +33,7 @@ def get_currency_rate(from_currency, to_currency="EUR"):
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
+            # Sanity check
             if from_currency == "USD" and to_currency == "EUR" and rate > 1.05:
                 return 1 / rate
             return rate
@@ -98,17 +99,25 @@ def search_yahoo(query):
 
 @st.cache_data(ttl=3600)
 def find_primary_ticker(company_name):
-    """Zoekt de Amerikaanse hoofdnotering op basis van naam"""
+    """Zoekt agressief naar de US hoofdnotering"""
     try:
-        # Schoon de naam op voor betere search (bv "PayPal Holdings Inc" -> "PayPal")
-        clean_name = re.sub(r' (Inc|Corp|AG|SE|PLC|Ltd|GmbH)\.?$', '', company_name, flags=re.IGNORECASE).strip()
+        # 1. Agressieve schoonmaak van de naam
+        # Split op eerste teken van "rommel"
+        base_name = re.split(r' (Inc|Corp|Corporation|Hldgs|Holdings|Group|Grp|AG|SE|PLC|Ltd|GmbH|S\.A\.|NV|Co\.|DL-|DRc)', company_name, flags=re.IGNORECASE)[0]
+        base_name = base_name.strip()
         
+        # 2. Zoeken in US regio
         headers = {'User-Agent': 'Mozilla/5.0'}
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={clean_name}&lang=en-US&region=US&quotesCount=1"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={base_name}&lang=en-US&region=US&quotesCount=5"
         r = requests.get(url, headers=headers, timeout=5)
         data = r.json()
-        if 'quotes' in data and len(data['quotes']) > 0:
-            return data['quotes'][0]['symbol']
+        
+        if 'quotes' in data:
+            for q in data['quotes']:
+                sym = q['symbol']
+                # 3. Filter: Zoek ticker ZONDER punt (dus geen .DE) en niet te lang (geen OTC)
+                if "." not in sym and len(sym) < 6:
+                    return sym
     except: pass
     return None
 
@@ -263,8 +272,9 @@ with tabs[0]:
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # Lijst met 'must-have' metrics om US search te triggeren
+                # Lijst met 'must-have' metrics
                 check_keys = ['forwardPE', 'pegRatio', 'targetMeanPrice', 'trailingPE']
+                # Als ook maar 1 sleutel mist, zoek de parent
                 missing_data = any(safe_get(info, k) is None for k in check_keys)
                 
                 if missing_data:

@@ -17,7 +17,7 @@ st.set_page_config(page_title="Aandelen Dashboard", layout="wide", page_icon="�
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- MAPPING (EU -> US voor rijkere data) ---
+# --- MAPPING (EU -> US) ---
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -29,11 +29,11 @@ EU_TO_US_MAP = {
 
 # --- TOOLTIPS ---
 TOOLTIPS = {
-    "peg": "Prijs/Winst gedeeld door Groei (5jr).\n🟢 < 1.5: Goedkoop.\n🔴 Negatief: Krimp.",
-    "fwd_pe": "Verwachte K/W komend jaar.\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Premie.",
+    "peg": "Prijs/Winst gedeeld door Groei.\n🟢 < 1.5: Goedkoop.\n🔴 Negatief: Krimp.",
+    "fwd_pe": "Verwachte K/W.\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Premie.",
     "roe": "Rendement op Eigen Vermogen.\n🟢 > 15%: Sterk management.",
     "de": "Schuldratio.\n🟢 < 1.0: Gezond.\n🔴 > 2.0: Veel schulden.",
-    "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
+    "cr": "Liquiditeit.\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
     "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk.",
     "div": "Dividend Rendement.\n🟢 > 3%: Hoog inkomen.",
     "beta": "Volatiliteit.\n🟢 < 0.8: Stabiel.\n🔴 > 1.5: Wild.",
@@ -48,11 +48,9 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     try:
         ticker = f"{from_curr}{to_curr}=X"
         if from_curr == "USD" and to_curr == "EUR": ticker = "EUR=X"
-        
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
-            # Sanity check: USD->EUR is ong 0.95. Als > 1.05 is het wss omgekeerd.
             if from_curr == "USD" and to_curr == "EUR" and rate > 1.02: return 1/rate
             return rate
         return 0.95 if from_curr == "USD" else 1.0
@@ -65,42 +63,49 @@ def truncate_text(text, max_len=25):
     if text and len(text) > max_len: return text[:max_len] + "..."
     return text
 
-# --- SCRAPERS ---
+# --- PRECISE SCRAPERS ---
 @st.cache_data(ttl=3600)
 def scrape_yahoo_advanced(ticker):
+    """Scrapet Yahoo Key Statistics pagina"""
     data = {}
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         r = requests.get(f"https://finance.yahoo.com/quote/{ticker}/key-statistics", headers=headers, timeout=5)
         if r.status_code == 200:
-            # Regex voor PEG en Forward PE in Yahoo HTML
-            m_fwd = re.search(r'Forward P/E.*?([\d\.]+)', r.text)
+            # Zoek specifiek naar Forward P/E waarde
+            m_fwd = re.search(r'>Forward P/E.*?<td.*?>(.*?)</td>', r.text, re.DOTALL)
             if m_fwd: 
-                try: data['fwd_pe'] = float(m_fwd.group(1))
+                try: data['fwd_pe'] = float(re.sub(r'[^\d\.]', '', m_fwd.group(1)))
                 except: pass
             
-            m_peg = re.search(r'PEG Ratio \(5 yr expected\).*?([\d\.]+)', r.text)
+            # Zoek specifiek naar PEG (5 yr expected)
+            m_peg = re.search(r'>PEG Ratio \(5 yr expected\).*?<td.*?>(.*?)</td>', r.text, re.DOTALL)
             if m_peg:
-                try: data['peg'] = float(m_peg.group(1))
+                try: data['peg'] = float(re.sub(r'[^\d\.]', '', m_peg.group(1)))
                 except: pass
     except: pass
     return data
 
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
+    """Scrapet Finviz met stricte regex"""
     try:
-        h = {'User-Agent': 'Mozilla/5.0'}
+        h = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         r = requests.get(f"https://finviz.com/quote.ashx?t={ticker}", headers=h, timeout=5)
         d = {}
         if r.status_code == 200:
             txt = r.text
-            def p(pat):
+            # Strictere regex: Zoek woord PEG, sluit tag, zoek volgende tag met bold
+            # Voorbeeld: <td>PEG</td><td...><b>0.93</b></td>
+            def p(label):
+                pat = rf'>{label}</td>.*?<b>\s*([\d\.]+)\s*</b>'
                 m = re.search(pat, txt, re.DOTALL)
                 return float(m.group(1)) if m else None
-            d['peg'] = p(r'>PEG<.*?<b>\s*([\d\.]+)\s*</b>')
-            d['pb'] = p(r'>P/B<.*?<b>\s*([\d\.]+)\s*</b>')
-            d['fwd_pe'] = p(r'>Forward P/E<.*?<b>\s*([\d\.]+)\s*</b>')
-            d['target'] = p(r'>Target Price<.*?<b>\s*([\d\.]+)\s*</b>')
+                
+            d['peg'] = p('PEG')
+            d['pb'] = p('P/B')
+            d['fwd_pe'] = p('Forward P/E')
+            d['target'] = p('Target Price')
         return d
     except: return {}
 
@@ -181,7 +186,7 @@ def calculate_score(m):
 
     return (score/total)*10 if total>0 else 5.0, opps, risks, neut
 
-# --- DATA BEHEER ---
+# --- DATA MANAGER (CALLBACK) ---
 def load_file_callback():
     uploaded_file = st.session_state.get('file_loader')
     if uploaded_file is not None:
@@ -203,7 +208,7 @@ st.sidebar.header("📂 Data")
 st.sidebar.download_button(f"⬇️ Download ({len(st.session_state['portfolio'])} port / {len(st.session_state['wishlist'])} wish)", get_json_data(), "aandelen.json", "application/json")
 st.sidebar.file_uploader("⬆️ Upload", type=['json'], key='file_loader', on_change=load_file_callback)
 st.sidebar.divider()
-if st.sidebar.button("🗑️ Reset Cache"): st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🔄 Cache Legen (Reset Data)"): st.cache_data.clear(); st.rerun()
 
 # --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist"])
@@ -247,7 +252,7 @@ with tabs[0]:
                 if sel_ticker in EU_TO_US_MAP:
                     mt = EU_TO_US_MAP[sel_ticker]
                     mi = yf.Ticker(mt).info
-                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio']):
+                elif any(safe_get(info, k) is None for k in ['forwardPE', 'pegRatio', 'targetMeanPrice']):
                     sn = safe_get(info, 'shortName', '')
                     us_t = find_primary_ticker(sn)
                     if us_t and us_t != sel_ticker:
@@ -258,9 +263,9 @@ with tabs[0]:
                 scrape = scrape_yahoo_advanced(mt)
 
                 def get_m(y_k, f_k, scrape_k=None, calc=None):
-                    if safe_get(mi, y_k) is not None: return mi[y_k], "Yahoo"
                     if scrape_k and scrape.get(scrape_k): return scrape[scrape_k], "Yahoo Web"
                     if f_k and fin.get(f_k): return fin[f_k], "Finviz"
+                    if safe_get(mi, y_k) is not None: return mi[y_k], "Yahoo API"
                     if calc:
                         c = calc()
                         if c is not None: return c, "Berekend"
@@ -403,7 +408,7 @@ with tabs[0]:
 # ==================================================
 with tabs[1]:
     st.title("Portfolio")
-    # INIT total_val VOORAF om crash te voorkomen
+    
     total_val = 0
     total_inv = 0
     
@@ -429,6 +434,7 @@ with tabs[1]:
                 
                 val = p_eur * item['amount']
                 cost = item['avg_price_eur'] * item['amount']
+                
                 total_val += val
                 total_inv += cost
                 
@@ -487,10 +493,8 @@ with tabs[1]:
         if st.button("Alles Wissen"):
             st.session_state['portfolio'] = []
             st.rerun()
-    else: 
-        st.info("Geen data.")
-        # Zorg dat total_val 0 is als er geen portfolio is (voor de calc)
-        total_val = 0
+            
+    else: st.info("Geen data.")
 
     # --- CALCULATOR (ALTIJD ZICHTBAAR) ---
     st.divider()
@@ -532,6 +536,7 @@ with tabs[2]:
                     pct = ((cp-pp)/pp)*100
                     
                     wi = s.info
+                    # Score lite (zonder advanced scrape voor snelheid)
                     pe = safe_get(wi, 'trailingPE')
                     g = safe_get(wi, 'earningsGrowth')
                     pg = pe/(g*100) if pe and g else None

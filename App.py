@@ -35,12 +35,14 @@ EU_TO_US_MAP = {
     "INGA.AS": "ING",                        # ING
     "MT.AS": "MT",                           # ArcelorMittal
     "DSM.AS": "DSM",                         # DSM
-    "2PP.DE": "PYPL"                         # Paypal Xetra
+    "2PP.DE": "PYPL",                        # Paypal
+    "NOVO-B.CO": "NVO",                      # Novo Nordisk
+    "NOVO-B.DE": "NVO"
 }
 
 # --- TOOLTIPS ---
 TOOLTIPS = {
-    "peg": "Prijs/Winst gedeeld door de Groei.\n\n🟢 < 1.5: Goedkoop t.o.v. groei.\n🔴 Negatief: Winst krimp.\n🟠 > 2.5: Prijs loopt voor op groei.",
+    "peg": "Prijs/Winst gedeeld door de Groei (5-jaars verwachting).\n\n🟢 < 1.5: Goedkoop t.o.v. groei.\n🔴 Negatief: Winst krimp.\n🟠 > 2.5: Prijs loopt voor op groei.",
     "fwd_pe": "Verwachte K/W voor komend jaar.\n\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Groeiaandeel premie.",
     "roe": "Rendement op Eigen Vermogen.\n\n🟢 > 15%: Sterk management.\n🔴 < 5%: Zwak.",
     "de": "Schuldratio.\n\n🟢 < 1.0: Gezond.\n🔴 > 2.0: Veel schulden.",
@@ -80,6 +82,31 @@ def safe_get(info_dict, key, default=None):
 def truncate_text(text, max_len=25):
     if text and len(text) > max_len: return text[:max_len] + "..."
     return text
+
+# --- DATASCRAPERS ---
+
+@st.cache_data(ttl=3600)
+def get_yahoo_peg_direct(ticker):
+    """Scrapet de 'Key Statistics' pagina van Yahoo voor de echte 5-yr PEG"""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        url = f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
+        r = requests.get(url, headers=headers, timeout=5)
+        
+        # Zoek naar "PEG Ratio (5 yr expected)" in de HTML
+        # De waarde staat vaak in de buurt van deze tekst in een tabel
+        if "PEG Ratio (5 yr expected)" in r.text:
+            # Simpele regex om het eerste getal na deze tekst te vinden
+            # Dit is een beetje 'hacky' maar werkt vaak waar de API faalt
+            match = re.search(r'PEG Ratio \(5 yr expected\).*?</td><td class="Ta\(c\) Pstart\(10px\) Miw\(60px\) Miw\(80px\)--pnclg Bgc\(\$lv1BgColor\) fi-row:h_Bgc\(\$hoverBgColor\)">([\d\.]+)</td>', r.text, re.DOTALL)
+            if not match:
+                # Probeer een generiekere regex voor andere Yahoo layouts
+                match = re.search(r'PEG Ratio \(5 yr expected\).*?([\d\.]+)', r.text)
+            
+            if match:
+                return float(match.group(1))
+    except: pass
+    return None
 
 @st.cache_data(ttl=3600)
 def get_finviz_data(ticker):
@@ -200,51 +227,43 @@ def calculate_score(metrics):
     final = (score / total) * 10 if total > 0 else 5.0
     return final, opps, risks, neut
 
-# --- FILE MANAGER (FIXED) ---
-def load_file_callback():
-    """Callback die alleen runt bij upload event"""
-    uploaded_file = st.session_state.get('uploader')
-    if uploaded_file is not None:
-        try:
-            uploaded_file.seek(0)
-            d = json.load(uploaded_file)
-            
-            if isinstance(d, list): 
-                st.session_state['portfolio'] = d
-                st.session_state['wishlist'] = []
-            elif isinstance(d, dict):
-                st.session_state['portfolio'] = d.get('portfolio', [])
-                st.session_state['wishlist'] = d.get('wishlist', [])
-                
-            st.toast(f"Data geladen! ({len(st.session_state['portfolio'])} aandelen)", icon="💾")
-        except Exception as e:
-            st.error(f"Fout bij laden: {e}")
-
-def get_download_json():
-    # Genereer de string vers op het moment van klikken
-    return json.dumps({
-        'portfolio': st.session_state['portfolio'], 
-        'wishlist': st.session_state['wishlist']
-    })
+# --- SAVE/LOAD ---
+def save_data():
+    return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
 # --- SIDEBAR ---
 st.sidebar.header("📂 Data Beheer")
 
 # Download
+count = len(st.session_state['portfolio'])
 st.sidebar.download_button(
-    label="⬇️ Download Data",
-    data=get_download_json(), # Functie-aanroep voor verse data
+    label=f"⬇️ Download ({count} items)",
+    data=save_data(),
     file_name="aandelen_data.json",
     mime="application/json"
 )
 
 # Upload
-st.sidebar.file_uploader(
-    "⬆️ Upload Data", 
-    type=['json'], 
-    key='uploader',
-    on_change=load_file_callback # Cruciaal: Alleen runnen bij verandering
-)
+uploaded_file = st.sidebar.file_uploader("⬆️ Upload Data", type=['json'])
+if uploaded_file:
+    try:
+        # Reset pointer
+        uploaded_file.seek(0)
+        data = json.load(uploaded_file)
+        
+        if isinstance(data, list):
+            st.session_state['portfolio'] = data
+        elif isinstance(data, dict):
+            st.session_state['portfolio'] = data.get('portfolio', [])
+            st.session_state['wishlist'] = data.get('wishlist', [])
+            
+        if len(st.session_state['portfolio']) > 0:
+            st.sidebar.success(f"✅ {len(st.session_state['portfolio'])} aandelen geladen!")
+        else:
+            st.sidebar.warning("Bestand is leeg.")
+            
+    except Exception as e:
+        st.sidebar.error(f"Fout: {e}")
 
 st.sidebar.divider()
 st.sidebar.info("Tip: .AS (Amsterdam) en .DE (Xetra) staan bovenaan.")
@@ -290,10 +309,10 @@ with tabs[0]:
                 rate = get_currency_rate(curr, "EUR")
                 price_eur = hist['Close'].iloc[-1] * rate
                 
+                # SMART DATA FETCH
                 metrics_ticker = sel_ticker
                 metrics_info = info
                 
-                # Smart Data Logic
                 if sel_ticker in EU_TO_US_MAP:
                     metrics_ticker = EU_TO_US_MAP[sel_ticker]
                     metrics_info = yf.Ticker(metrics_ticker).info
@@ -315,16 +334,23 @@ with tabs[0]:
                         if c is not None: return c, "Berekend"
                     return None, "N/A"
 
-                def calc_peg():
-                    p = safe_get(metrics_info, 'trailingPE') or safe_get(metrics_info, 'forwardPE')
-                    g = safe_get(metrics_info, 'earningsGrowth')
-                    if not g: g = safe_get(metrics_info, 'revenueGrowth')
-                    return p/(g*100) if p and g else None
+                # PEG PRIORITY: 1. Yahoo Site (Scraper), 2. Yahoo API, 3. Finviz, 4. Calc
+                peg_scrape = get_yahoo_peg_direct(metrics_ticker)
+                if peg_scrape:
+                    peg = peg_scrape; peg_src = "Yahoo Website (Direct)"
+                else:
+                    def calc_peg():
+                        p = safe_get(metrics_info, 'trailingPE') or safe_get(metrics_info, 'forwardPE')
+                        g = safe_get(metrics_info, 'earningsGrowth')
+                        if not g: g = safe_get(metrics_info, 'revenueGrowth')
+                        # Blokkeer negatieve groei berekening als er geen PEG is
+                        if g and g > 0 and p: return p/(g*100)
+                        return None
+                    peg, peg_src = get_val('pegRatio', 'peg', calc_peg)
 
-                peg, peg_src = get_val('pegRatio', 'peg', calc_peg)
                 fwd_pe, fwd_src = get_val('forwardPE', 'fwd_pe')
                 pb, pb_src = get_val('priceToBook', 'pb')
-                
+
                 tgt, tgt_src = get_val('targetMeanPrice', 'target')
                 if tgt:
                     t_curr = safe_get(metrics_info, 'currency', 'USD')
@@ -377,6 +403,7 @@ with tabs[0]:
                                 if st.form_submit_button("Opslaan"):
                                     st.session_state['portfolio'].append({"ticker": sel_ticker, "amount": a, "avg_price_eur": p})
                                     st.toast("Toegevoegd!", icon="✅")
+                                    st.rerun()
                         with tw:
                             if st.button("Zet op Wishlist"):
                                 exists = any(x['ticker'] == sel_ticker for x in st.session_state['wishlist'])
@@ -533,7 +560,7 @@ with tabs[1]:
         c_sec, c_div = st.columns(2)
         with c_sec:
             st.subheader("Sectoren")
-            if sec_dist:
+            if sec_dist and sum(sec_dist.values()) > 0: # FIX: Check op non-zero
                 fig = px.pie(values=list(sec_dist.values()), names=list(sec_dist.keys()), hole=0.4)
                 fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=250)
                 st.plotly_chart(fig, use_container_width=True)
@@ -576,7 +603,7 @@ with tabs[1]:
     else: st.info("Nog geen aandelen.")
 
 # ==================================================
-# TAB 3: WISHLIST
+# TAB 3: WISHLIST (Mobile Optimized)
 # ==================================================
 with tabs[2]:
     st.title("❤️ Mijn Wishlist")
@@ -584,18 +611,17 @@ with tabs[2]:
         for item in st.session_state['wishlist']:
             ticker = item['ticker']
             try:
-                # SNELLE DATA VOOR WISHLIST
+                # Data
                 ws = yf.Ticker(ticker)
-                wh = ws.history(period="2d")
+                w_hist = w_stock.history(period="2d")
                 curr = safe_get(ws.info, 'currency', 'EUR')
                 rate = get_currency_rate(curr, "EUR")
                 
-                if not wh.empty:
-                    curr_price = wh['Close'].iloc[-1] * rate
-                    prev_price = wh['Close'].iloc[0] * rate
-                    change_pct = ((curr_price - prev_price) / prev_price) * 100
+                if not w_hist.empty:
+                    cp = w_hist['Close'].iloc[-1] * rate
+                    pp = w_hist['Close'].iloc[0] * rate
+                    pct = ((cp-pp)/pp)*100
                     
-                    # Basic Score (Yahoo only for speed)
                     wi = ws.info
                     wpeg = safe_get(wi, 'pegRatio')
                     if wpeg is None:
@@ -608,20 +634,32 @@ with tabs[2]:
                     wsc, _, _, _ = calculate_score(wd)
                     scol = "green" if wsc>=7 else ("orange" if wsc>=5.5 else "red")
                 else:
-                    curr_price = 0; change_pct = 0; wsc = 0; scol = "gray"
-            except:
-                curr_price = 0; change_pct = 0; wsc = 0; scol = "gray"
+                    cp=0; pct=0; wsc=0; scol="gray"
+            except: cp=0; pct=0; wsc=0; scol="gray"
 
-            c1, c2, c3, c4 = st.columns([4, 3, 2, 1])
-            with c1: st.write(f"**{item['name']}**\n<span style='color:gray;font-size:0.8em'>{ticker}</span>", unsafe_allow_html=True)
-            with c2: 
-                col_txt = "green" if change_pct >= 0 else "red"
-                st.write(f"€ {curr_price:.2f}\n<span style='color:{col_txt}'>{change_pct:+.1f}%</span>", unsafe_allow_html=True)
-            with c3: st.write(f"AI: :{scol}[{wsc:.1f}]")
-            with c4:
-                if st.button("🔎", key=f"wl_{ticker}"):
+            # Compact 2-Kolom Layout
+            c_info, c_btn = st.columns([4, 1])
+            with c_info:
+                # Alles in één HTML blok voor perfecte uitlijning op mobiel
+                col_txt = "green" if pct >= 0 else "red"
+                st.markdown(f"""
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <b>{item['name']}</b><br>
+                        <span style='color:gray; font-size:0.8em'>{ticker}</span>
+                    </div>
+                    <div style="text-align:right;">
+                        <b>€ {cp:.2f}</b> <span style='color:{col_txt}; font-size:0.9em'>({pct:+.1f}%)</span><br>
+                        <span style='font-size:0.8em'>AI Score: <b style='color:{scol}'>{wsc:.1f}</b></span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with c_btn:
+                if st.button("🔎", key=f"w_{ticker}"):
                     st.session_state['search_query'] = ticker
-                    st.toast("Zie Analyse!", icon="🚀")
+                    st.toast("Analyse laden...", icon="⏳")
+                    st.rerun() # Gaat terug naar analyse tab met query
             st.divider()
             
         if st.button("Legen"):

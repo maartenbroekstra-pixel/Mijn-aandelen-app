@@ -74,39 +74,28 @@ def truncate_text(text, max_len=22):
     if text and len(text) > max_len: return text[:max_len] + ".."
     return text
 
-# --- MULTI-SOURCE SCRAPERS ---
+# --- SCRAPERS ---
 
 @st.cache_data(ttl=600)
 def scrape_yahoo_live(ticker):
-    """Scrapet direct de HTML van Yahoo Finance (Analysis & Key Stats)"""
+    """Scrapet direct de HTML van Yahoo Finance"""
     data = {}
-    
-    # 1. ANALYSIS PAGINA (Voor Koersdoelen & Groei)
     try:
+        # 1. Analysis Pagina (Targets)
         url_an = f"https://finance.yahoo.com/quote/{ticker}/analysis"
         r = requests.get(url_an, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             txt = r.text
-            # Target Price
             m_tgt = re.search(r'Average Target.*?<td.*?>(.*?)</td>', txt, re.DOTALL)
             if m_tgt:
                 val = re.sub(r'[^\d\.]', '', m_tgt.group(1))
                 if val: data['target'] = float(val)
             
-            # Growth Estimates Next 5 Years
-            m_gr = re.search(r'Next 5 Years \(per annum\).*?<td.*?>(.*?)%</td>', txt, re.DOTALL)
-            if m_gr:
-                val = re.sub(r'[^\d\.-]', '', m_gr.group(1))
-                if val: data['growth_5y'] = float(val)
-    except: pass
-
-    # 2. STATISTICS PAGINA (Voor PEG & P/E)
-    try:
+        # 2. Key Statistics (PEG, PE)
         url_st = f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
         r = requests.get(url_st, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             txt = r.text
-            
             def get_stat(regex):
                 m = re.search(regex, txt, re.DOTALL)
                 if m:
@@ -124,12 +113,11 @@ def scrape_yahoo_live(ticker):
             data['cr'] = get_stat(r'Current Ratio.*?<td.*?>(.*?)</td>')
             
     except: pass
-    
     return data
 
 @st.cache_data(ttl=600)
 def get_finviz_data(ticker):
-    """Finviz Scraper (vooral goed voor US tickers)"""
+    """Finviz Scraper"""
     d = {}
     try:
         r = requests.get(f"https://finviz.com/quote.ashx?t={ticker}", headers=HEADERS, timeout=4)
@@ -146,35 +134,28 @@ def get_finviz_data(ticker):
     return d
 
 def search_yahoo_strict(query):
-    """Zoekt en forceert EU tickers bovenaan"""
     try:
-        # We zoeken in de DE regio voor betere Xetra matches
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=15"
         r = requests.get(url, headers=HEADERS, timeout=3)
         d = r.json()
         res = []
         if 'quotes' in d:
             qs = d['quotes']
-            
-            # HARDE SORTERING: .DE en .F MOETEN bovenaan
             def sort_key(q):
                 s = q.get('symbol', '')
-                if s.endswith('.DE'): return 0      # Xetra (Best)
-                if s.endswith('.F'): return 1       # Frankfurt
-                if s.endswith('.AS'): return 2      # Amsterdam
-                if '.' not in s: return 10          # US (Backup)
-                return 20                           # Rest
-            
+                if s.endswith('.DE'): return 0
+                if s.endswith('.F'): return 1
+                if s.endswith('.AS'): return 2
+                if '.' not in s: return 10
+                return 20
             qs.sort(key=sort_key)
-            
             for q in qs:
                 res.append(f"{q['symbol']} | {q.get('shortname','')}")
         return res
     except: return []
 
-def get_news(query):
+def get_google_news(query):
     try:
-        # Google News RSS
         r = requests.get(f"https://news.google.com/rss/search?q={query}+stock&hl=en-US&gl=US&ceid=US:en", timeout=4)
         root = ET.fromstring(r.content)
         items = []
@@ -185,7 +166,7 @@ def get_news(query):
     except: return []
 
 @st.cache_data(ttl=3600)
-def get_youtube_id(query):
+def get_youtube_video_id(query):
     try:
         url = f"https://www.youtube.com/results?search_query={query.replace(' ','+')}+stock+analysis+{datetime.now().year}"
         r = requests.get(url, headers=HEADERS, timeout=5)
@@ -193,12 +174,12 @@ def get_youtube_id(query):
         return vids[0] if vids else None
     except: return None
 
-# --- AI LOGICA ---
-def calculate_score(metrics, eps=None):
+# --- AI LOGICA (HIER GEDEFINIEERD) ---
+def calculate_ai_score(metrics, eps=None):
     score, count = 0, 0
     opps, risks = [], []
     
-    # Kill Switch: Verlieslatend
+    # Kill Switch
     margin = metrics.get('margin', 0) or 0
     if (eps and eps < 0) or margin < 0:
         return 4.0, [], ["Verlieslatend bedrijf (Negatieve Winst/Marge)"]
@@ -223,11 +204,6 @@ def calculate_score(metrics, eps=None):
                 score += 0.5
             
     final = (score/count)*10 if count > 0 else 5.0
-    
-    # Schuld Straf
-    if metrics.get('de') and metrics.get('de') > 4: 
-        final = min(final, 3.5); risks.insert(0, "Kritiek schuldniveau")
-
     return round(final, 1), opps, risks
 
 # --- DATA MANAGER ---
@@ -289,7 +265,7 @@ with tabs[0]:
                 # SMART DATA
                 mt = sel
                 if sel in EU_TO_US_MAP: mt = EU_TO_US_MAP[sel]
-                elif "." in sel: # Dynamisch zoeken naar US parent
+                elif "." in sel:
                     sn = safe_get(info, 'shortName', '')
                     base = re.split(r' (Inc|Corp|AG|SE|NV)', sn)[0].strip()
                     try:
@@ -300,25 +276,18 @@ with tabs[0]:
                     except: pass
 
                 # SCAPEN
-                yscrape = scrape_yahoo_live(mt) # DE CORRECTE NAAM
+                yscrape = scrape_yahoo_live(mt)
                 fin = get_finviz_data(mt)
 
-                # METRIC KIEZER
                 def get_m(y_k, f_k, s_k, calc=None):
-                    # Prio 1: Scrapers
                     if s_k and yscrape.get(s_k): return yscrape[s_k], "Yahoo Web"
                     if f_k and fin.get(f_k): return fin[f_k], "Finviz"
-                    
-                    # Prio 2: API
                     if safe_get(info, y_k) is not None: return info[y_k], "Yahoo API"
-                    
-                    # Prio 3: Calc
                     if calc:
                         c = calc()
                         if c: return c, "Berekend"
                     return None, "N/A"
 
-                # PEG
                 def c_peg():
                     p = safe_get(info, 'trailingPE')
                     g = safe_get(info, 'earningsGrowth')
@@ -326,10 +295,8 @@ with tabs[0]:
                     return None
                 peg, peg_s = get_m('pegRatio', 'peg', 'peg', c_peg)
 
-                # Forward P/E
                 fwd, fwd_s = get_m('forwardPE', 'fwd_pe', 'fwd_pe', None)
-
-                # Target
+                
                 tgt, tgt_s = get_m('targetMeanPrice', 'target', 'target') 
                 if tgt: 
                     tgt *= get_currency_rate(safe_get(yf.Ticker(mt).info, 'currency', 'USD'), "EUR")
@@ -341,7 +308,7 @@ with tabs[0]:
                 if de and de > 10: de/=100
                 cr, cr_s = get_m('currentRatio', None, 'cr')
                 roe, roe_s = get_m('returnOnEquity', None, 'roe')
-                
+
                 dy, dy_s = get_m('dividendYield', None, None)
                 if not dy:
                     dr = safe_get(info, 'dividendRate')
@@ -410,7 +377,6 @@ with tabs[0]:
                 def dm2(i, l, v, s, k, f="{:.2f}"):
                     c = "⚪"
                     if v:
-                        # Herhaling kleur logic voor 2e rij
                         if l=="Current": c="🟢" if v>1.5 else "🟠"
                         if l=="D/E": c="🟢" if v<1 else "🟠"
                         if l=="P/B": c="🟢" if 0<v<3 else "🟠"
@@ -429,11 +395,11 @@ with tabs[0]:
                     st.markdown("##### 📰 Nieuws")
                     for n in get_google_news(safe_get(info, 'shortName', sel)):
                         st.markdown(f"[{n['title']}]({n['link']})")
+                        st.divider()
                 with cv:
                     st.markdown("##### 📺 Video")
                     vid = get_youtube_video_id(safe_get(info, 'shortName', sel))
                     if vid: st.video(f"https://www.youtube.com/watch?v={vid}")
-
         except Exception as e: st.error(f"Fout: {e}")
 
 # ==================================================
@@ -447,7 +413,8 @@ with tabs[1]:
         sd = {}
         dc = []
         
-        for item in st.session_state['portfolio']:
+        bar = st.progress(0)
+        for i, item in enumerate(st.session_state['portfolio']):
             try:
                 t = item['ticker']
                 tk = yf.Ticker(t)
@@ -474,6 +441,8 @@ with tabs[1]:
 
                 rows.append({"Naam": t, "Aantal": item['amount'], "Prijs": f"€{cur:.2f}", "Waarde": f"€{v:.2f}", "Winst": f"€{v-c:.2f}"})
             except: pass
+            bar.progress((i+1)/len(st.session_state['portfolio']))
+        bar.empty()
         
         k1, k2 = st.columns(2)
         k1.metric("Waarde", f"€ {tv:,.2f}")
@@ -489,7 +458,6 @@ with tabs[1]:
                 st.dataframe(dfd, hide_index=True)
         
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-        
         if st.button("Wissen"): st.session_state['portfolio'] = []; st.rerun()
         
         with st.expander("🧮 Calculator"):

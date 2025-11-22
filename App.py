@@ -6,23 +6,23 @@ import plotly.express as px
 import requests
 import json
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
 import numpy as np
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# --- STATE ---
+# --- STATE MANAGEMENT ---
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- BROWSER HEADER (Om blokkades te voorkomen) ---
+# --- CONSTANTEN ---
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# --- MAPPING ---
+# Mapping voor rijkere data (EU ticker -> US ticker voor metrics)
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -30,6 +30,25 @@ EU_TO_US_MAP = {
     "OR.PA": "LRLCY", "ASML.AS": "ASML", "PHIA.AS": "PHG", "INGA.AS": "ING",
     "MT.AS": "MT", "DSM.AS": "DSM", "2PP.DE": "PYPL", "NOVO-B.CO": "NVO",
     "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD"
+}
+
+TAX_DEFAULTS = {
+    2023: {"invest": 6.17, "tax": 32},
+    2024: {"invest": 6.04, "tax": 36},
+    2025: {"invest": 5.88, "tax": 36}
+}
+
+TOOLTIPS = {
+    "peg": "Prijs/Winst gedeeld door Groei (5jr).\n🟢 < 1.5: Goedkoop.\n🔴 Negatief: Krimp.\n🟠 > 2.5: Duur.",
+    "fwd_pe": "Verwachte K/W komend jaar.\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Premie.",
+    "roe": "Rendement op Eigen Vermogen.\n🟢 > 15%: Sterk management.",
+    "de": "Schuldratio.\n🟢 < 1.0: Gezond.\n🔴 > 2.0: Veel schulden.",
+    "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
+    "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk.",
+    "div": "Dividend Rendement.\n🟢 > 3%: Hoog inkomen.",
+    "beta": "Volatiliteit.\n🟢 < 0.8: Stabiel.\n🔴 > 1.5: Wild.",
+    "rsi": "Momentum.\n🟢 < 30: Koopkans?.",
+    "margin": "Winstmarge.\n🟢 > 20%: Zeer winstgevend."
 }
 
 # --- HULPFUNCTIES ---
@@ -55,65 +74,49 @@ def truncate_text(text, max_len=22):
     if text and len(text) > max_len: return text[:max_len] + ".."
     return text
 
-# --- LIVE SCRAPERS (DE HARDE METHODE) ---
+# --- MULTI-SOURCE SCRAPERS ---
 
 @st.cache_data(ttl=600)
-def scrape_yahoo_live_metrics(ticker):
-    """Scrapet DIRECT van de HTML pagina's van Yahoo. Omzeilt de API."""
+def scrape_yahoo_live(ticker):
+    """Scrapet direct de HTML van Yahoo Finance (Analysis & Key Stats)"""
     data = {}
-    
-    # 1. ANALYSIS PAGINA (Voor Koersdoelen & Groei)
     try:
+        # 1. Analysis Pagina (Voor Targets & Revenue)
         url_an = f"https://finance.yahoo.com/quote/{ticker}/analysis"
         r = requests.get(url_an, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             txt = r.text
-            # Zoek naar Average Target
+            # Target Price
             m_tgt = re.search(r'Average Target.*?<td.*?>(.*?)</td>', txt, re.DOTALL)
             if m_tgt:
                 val = re.sub(r'[^\d\.]', '', m_tgt.group(1))
                 if val: data['target'] = float(val)
             
-            # Zoek naar Growth Estimates Next 5 Years
-            m_gr = re.search(r'Next 5 Years \(per annum\).*?<td.*?>(.*?)%</td>', txt, re.DOTALL)
-            if m_gr:
-                val = re.sub(r'[^\d\.-]', '', m_gr.group(1))
-                if val: data['growth_5y'] = float(val)
-    except: pass
-
-    # 2. STATISTICS PAGINA (Voor PEG, Forward PE, P/B)
-    try:
+        # 2. Key Statistics (Voor PEG & P/E)
         url_st = f"https://finance.yahoo.com/quote/{ticker}/key-statistics"
         r = requests.get(url_st, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             txt = r.text
             
-            def get_stat(label):
-                # Zoek label, skip html tags, pak waarde
-                m = re.search(rf'{label}.*?<td.*?>(.*?)</td>', txt, re.DOTALL)
+            def get_stat(regex):
+                m = re.search(regex, txt, re.DOTALL)
                 if m:
-                    raw = m.group(1)
-                    # Verwijder tags en pak getal
-                    clean = re.sub(r'<.*?>', '', raw).strip()
+                    clean = re.sub(r'<.*?>', '', m.group(1)).strip()
                     clean = re.sub(r'[^\d\.-]', '', clean)
                     return float(clean) if clean else None
                 return None
 
-            data['peg'] = get_stat(r'PEG Ratio \(5 yr expected\)')
-            data['fwd_pe'] = get_stat(r'Forward P/E')
-            data['pb'] = get_stat(r'Price/Book')
-            data['profit_margin'] = get_stat(r'Profit Margin')
-            data['roe'] = get_stat(r'Return on Equity')
-            data['de'] = get_stat(r'Total Debt/Equity')
-            data['cr'] = get_stat(r'Current Ratio')
+            data['peg'] = get_stat(r'PEG Ratio \(5 yr expected\).*?<td.*?>(.*?)</td>')
+            data['fwd_pe'] = get_stat(r'Forward P/E.*?<td.*?>(.*?)</td>')
+            data['pb'] = get_stat(r'Price/Book.*?<td.*?>(.*?)</td>')
+            data['profit_margin'] = get_stat(r'Profit Margin.*?<td.*?>(.*?)</td>')
             
     except: pass
-    
     return data
 
 @st.cache_data(ttl=600)
 def get_finviz_data(ticker):
-    """Finviz scraper (US Stocks)"""
+    """Finviz Scraper (vooral goed voor US tickers)"""
     d = {}
     try:
         r = requests.get(f"https://finviz.com/quote.ashx?t={ticker}", headers=HEADERS, timeout=4)
@@ -129,10 +132,25 @@ def get_finviz_data(ticker):
     except: pass
     return d
 
-def search_yahoo_strict(query):
-    """Zoekt en forceert EU tickers bovenaan"""
+@st.cache_data(ttl=600)
+def scrape_google_finance(ticker):
+    """Google Finance Scraper (Fallback)"""
+    d = {}
     try:
-        # We zoeken in de DE regio voor betere Xetra matches
+        # Probeer NASDAQ en NYSE
+        for exc in [":NASDAQ", ":NYSE", ""]:
+            url = f"https://www.google.com/finance/quote/{ticker}{exc}"
+            r = requests.get(url, headers=HEADERS, timeout=3)
+            if r.status_code == 200:
+                if "P/E ratio" in r.text:
+                    m = re.search(r'P/E ratio</div>.*?<div class=".*?">([\d\.]+)</div>', r.text, re.DOTALL)
+                    if m: d['pe'] = float(m.group(1)); break
+    except: pass
+    return d
+
+def search_yahoo_strict(query):
+    """Zoekt met HARDE prioriteit voor EU tickers (.DE, .AS, .F)"""
+    try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=15"
         r = requests.get(url, headers=HEADERS, timeout=3)
         d = r.json()
@@ -140,10 +158,10 @@ def search_yahoo_strict(query):
         if 'quotes' in d:
             qs = d['quotes']
             
-            # HARDE SORTERING: .DE en .F MOETEN bovenaan
+            # Sorteringsalgoritme
             def sort_key(q):
                 s = q.get('symbol', '')
-                if s.endswith('.DE'): return 0      # Xetra (Best)
+                if s.endswith('.DE'): return 0      # Xetra (Top)
                 if s.endswith('.F'): return 1       # Frankfurt
                 if s.endswith('.AS'): return 2      # Amsterdam
                 if '.' not in s: return 10          # US (Backup)
@@ -156,9 +174,8 @@ def search_yahoo_strict(query):
         return res
     except: return []
 
-def get_news(query):
+def get_google_news(query):
     try:
-        # Google News RSS
         r = requests.get(f"https://news.google.com/rss/search?q={query}+stock&hl=en-US&gl=US&ceid=US:en", timeout=4)
         root = ET.fromstring(r.content)
         items = []
@@ -168,35 +185,48 @@ def get_news(query):
         return items
     except: return []
 
-# --- AI LOGICA ---
-def calculate_score(metrics, eps_val=None):
+@st.cache_data(ttl=3600)
+def get_youtube_id(query):
+    try:
+        url = f"https://www.youtube.com/results?search_query={query.replace(' ','+')}+stock+analysis+{datetime.now().year}"
+        r = requests.get(url, headers=HEADERS, timeout=5)
+        vids = re.findall(r"watch\?v=(\S{11})", r.text)
+        return vids[0] if vids else None
+    except: return None
+
+# --- SCORE LOGICA ---
+def calculate_ai_score(metrics, eps=None):
     score, count = 0, 0
     opps, risks = [], []
     
-    # Kill Switch
-    if metrics.get('margin') and metrics['margin'] < 0:
-        return 3.0, [], ["Verlieslatend (Negatieve Marge)"]
-    
+    # Kill Switch: Verlieslatend
+    margin = metrics.get('margin', 0) or 0
+    if (eps and eps < 0) or margin < 0:
+        return 4.0, [], ["Verlieslatend bedrijf (Negatieve Winst/Marge)"]
+
     rules = [
-        (metrics.get('peg'), "PEG", lambda x: 0<x<1.5, lambda x: x<0 or x>2.5),
+        (metrics.get('peg'), "PEG", lambda x: 0<x<1.5, lambda x: x<0 or x>3.0),
         (metrics.get('fwd_pe'), "Fwd P/E", lambda x: 0<x<20, lambda x: x>40),
-        (metrics.get('roe'), "ROE", lambda x: x>15, lambda x: x<5), # Scraper geeft vaak % als getal (15 ipv 0.15)
-        (metrics.get('de'), "D/E", lambda x: x<100, lambda x: x>200), # Yahoo geeft vaak % (150 ipv 1.5)
-        (metrics.get('cr'), "Current", lambda x: x>1.5, lambda x: x<1.0),
+        (metrics.get('roe'), "ROE", lambda x: x>0.15, lambda x: x<0.05),
+        (metrics.get('de'), "D/E", lambda x: x<1.0, lambda x: x>2.5),
+        (metrics.get('cr'), "Current", lambda x: x>1.5, lambda x: x<0.9),
         (metrics.get('pb'), "P/B", lambda x: 0<x<3.0, lambda x: x>10)
     ]
     
     for val, name, good, bad in rules:
         if val is not None:
             count += 1
-            if good(val): score += 1; opps.append(f"{name} ({val:.2f})")
-            elif bad(val): risks.append(f"{name} ({val:.2f})")
-            else: score += 0.5
+            if good(val): 
+                score += 1; opps.append(f"{name} ({val:.2f})")
+            elif bad(val):
+                risks.append(f"{name} ({val:.2f})")
+            else:
+                score += 0.5
             
     final = (score/count)*10 if count > 0 else 5.0
     return round(final, 1), opps, risks
 
-# --- DATA MANAGER ---
+# --- DATA MANAGER (Callback Fix) ---
 def handle_upload():
     f = st.session_state.get('uploader')
     if f:
@@ -209,20 +239,22 @@ def handle_upload():
             st.toast("Geladen!", icon="💾")
         except: st.error("Fout bestand.")
 
-def get_json(): return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
+def get_json():
+    return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
-# --- UI ---
+# --- SIDEBAR ---
 st.sidebar.header("📂 Data")
 st.sidebar.download_button(f"⬇️ Download", get_json(), "data.json", "application/json")
 st.sidebar.file_uploader("⬆️ Upload", type=['json'], key='uploader', on_change=handle_upload)
 st.sidebar.divider()
-if st.sidebar.button("🧹 Reset"): st.cache_data.clear(); st.rerun()
+if st.sidebar.button("🧹 Cache Legen"): st.cache_data.clear(); st.rerun()
 
+# --- TABS ---
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist", "🇳🇱 Belasting"])
 
-# ==========================
+# ==================================================
 # 1. ANALYSE
-# ==========================
+# ==================================================
 with tabs[0]:
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -242,114 +274,160 @@ with tabs[0]:
         try:
             st.markdown("---")
             tick = yf.Ticker(sel)
+            info = tick.info
             hist = tick.history(period=per)
             
             if hist.empty: st.error("Geen koersdata.")
             else:
-                inf = tick.info
-                curr = safe_get(inf, 'currency', 'EUR')
+                # Koers
+                curr = safe_get(info, 'currency', 'EUR')
                 rate = get_currency_rate(curr, "EUR")
                 price = hist['Close'].iloc[-1] * rate
                 
-                # DATA OPHALEN
+                # DATA LOGICA
                 mt = sel
                 if sel in EU_TO_US_MAP: mt = EU_TO_US_MAP[sel]
                 elif "." in sel: # Dynamisch zoeken naar US parent
-                    sn = safe_get(inf, 'shortName', '')
+                    sn = safe_get(info, 'shortName', '')
                     base = re.split(r' (Inc|Corp|AG|SE|NV)', sn)[0].strip()
                     try:
-                        # Quick check via search
                         us_res = search_yahoo_strict(base) 
                         for r in us_res:
                             s = r.split(" | ")[0]
                             if "." not in s: mt = s; break
                     except: pass
 
-                # Scrape Yahoo Live & Finviz
+                # SCAPEN
                 yscrape = scrape_yahoo_live_metrics(mt)
                 fin = get_finviz_data(mt)
+                goog = scrape_google_finance(mt)
 
-                def get_val(k, y_k=None):
-                    # Prio 1: Yahoo Scraper
-                    if yscrape.get(k): return yscrape[k], "Yahoo Live"
-                    # Prio 2: Finviz
-                    if fin.get(k): return fin[k], "Finviz"
-                    # Prio 3: API (Voor sommige basisdingen)
-                    if y_k and safe_get(inf, y_k): return inf[y_k], "Yahoo API"
+                # METRIC KIEZER
+                def get_m(y_k, f_k, s_k, g_k=None, calc=None):
+                    # Prio 1: Scrapers
+                    if s_k and yscrape.get(s_k): return yscrape[s_k], "Yahoo Web"
+                    if f_k and fin.get(f_k): return fin[f_k], "Finviz"
+                    if g_k and goog.get(g_k): return goog[g_k], "Google Fin"
+                    
+                    # Prio 2: API
+                    if safe_get(info, y_k) is not None: return info[y_k], "Yahoo API"
+                    
+                    # Prio 3: Calc
+                    if calc:
+                        c = calc()
+                        if c: return c, "Berekend"
                     return None, "N/A"
 
-                peg, peg_s = get_val('peg', 'pegRatio')
-                fwd, fwd_s = get_val('fwd_pe', 'forwardPE')
-                tgt, tgt_s = get_val('target', 'targetMeanPrice')
-                if tgt: tgt *= get_currency_rate(safe_get(yf.Ticker(mt).info, 'currency', 'USD'), "EUR")
+                # PEG
+                def c_peg():
+                    p = safe_get(info, 'trailingPE')
+                    g = safe_get(info, 'earningsGrowth')
+                    if p and g and p > 0 and g > 0: return p/(g*100)
+                    return None
+                peg, peg_s = get_m('pegRatio', 'peg', 'peg', None, c_peg)
+
+                fwd, fwd_s = get_m('forwardPE', 'fwd_pe', 'fwd_pe', None)
                 
-                pb, pb_s = get_val('pb', 'priceToBook')
-                roe, roe_s = get_val('roe', 'returnOnEquity')
-                de, de_s = get_val('de', 'debtToEquity')
-                cr, cr_s = get_val('cr', 'currentRatio')
-                marg, marg_s = get_val('profit_margin', 'profitMargins')
+                # Target
+                tgt, tgt_s = get_m('targetMeanPrice', 'target', 'target')
+                if tgt: 
+                    tgt *= get_currency_rate(safe_get(yf.Ticker(mt).info, 'currency', 'USD'), "EUR")
+                    upside = f"{((tgt-price)/price)*100:+.1f}%"
+                else: upside = ""
 
-                # Math Engine Fallback (Als ALLES faalt)
-                if not peg and fwd and yscrape.get('growth_5y'):
-                    peg = fwd / yscrape['growth_5y']
-                    peg_s = "Berekend"
+                pb, pb_s = get_m('priceToBook', 'pb', 'pb')
+                de, de_s = get_m('debtToEquity', None, 'de')
+                if de and de > 10: de/=100
+                cr, cr_s = get_m('currentRatio', None, 'cr')
+                roe, roe_s = get_m('returnOnEquity', None, 'roe')
 
-                # Score
+                # Dividend
+                dy, dy_s = get_m('dividendYield', None, None)
+                if not dy:
+                    dr = safe_get(info, 'dividendRate')
+                    if dr:
+                        try:
+                            op = yf.Ticker(mt).history(period="1d")['Close'].iloc[-1]
+                            dy = dr/op; dy_s = "Berekend"
+                        except: pass
+                if dy and dy > 0.5: dy/=100
+
+                beta = safe_get(info, 'beta')
+                marg, marg_s = get_m('profitMargins', None, 'profit_margin')
+                eps = fin.get('eps')
+
                 sd = {'peg': peg, 'fwd_pe': fwd, 'roe': roe, 'de': de, 'cr': cr, 'pb': pb, 'margin': marg}
-                score, opps, risks = calculate_ai_score(sd)
+                score, opps, risks = calculate_ai_score(sd, eps)
 
-                # UI
+                # HEADER
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1: 
-                    st.title(truncate_text(safe_get(inf, 'shortName', sel)))
+                    st.title(truncate_text(safe_get(info, 'shortName', sel)))
                     st.caption(f"{sel} | Data: {mt}")
                 with c2: st.metric("Prijs", f"€ {price:.2f}")
-                with c3: st.metric("Doel", f"€ {tgt:.2f}" if tgt else "-", help=f"Bron: {tgt_s}")
+                with c3: st.metric("Doel", f"€ {tgt:.2f}" if tgt else "-", delta=upside, help=f"Bron: {tgt_s}")
                 with c4:
                     with st.popover("➕"):
                         with st.form("add"):
                             n = st.number_input("Aantal", 1.0)
                             p = st.number_input("GAK", value=float(round(price, 2)))
-                            if st.form_submit_button("Portfolio"):
+                            if st.form_submit_button("Opslaan"):
                                 st.session_state['portfolio'].append({'ticker': sel, 'amount': n, 'avg_price_eur': p})
                                 st.rerun()
                         if st.button("Wishlist"):
-                            st.session_state['wishlist'].append({'ticker': sel, 'name': safe_get(inf, 'shortName')})
+                            st.session_state['wishlist'].append({'ticker': sel, 'name': safe_get(info, 'shortName')})
                             st.rerun()
 
                 col = "green" if score>=7 else "orange" if score>=5.5 else "red"
-                st.markdown(f"""<div style="display:flex; align-items:center; gap: 15px; margin: 10px 0;">
-                    <div style="min-width:70px; height:70px; border-radius:50%; border:5px solid {col}; display:flex; align-items:center; justify-content:center;">
+                st.markdown(f"""
+                <div style="display:flex; align-items:center; gap: 15px; margin: 10px 0;">
+                    <div style="min-width:80px; height:80px; border-radius:50%; border:5px solid {col}; display:flex; align-items:center; justify-content:center;">
                         <span style="font-size:24px; font-weight:bold; color:{col}">{score:.1f}</span>
                     </div>
                     <div><small>✅ {', '.join(opps) if opps else '-'}<br>⚠️ {', '.join(risks) if risks else '-'}</small></div>
                 </div>""", unsafe_allow_html=True)
 
+                # METRICS
                 cols = st.columns(4)
-                def dm(i, l, v, s, k):
+                def dm(i, l, v, s, k, f="{:.2f}"):
                     c="⚪"
                     if v:
                         if l=="PEG": c="🟢" if 0<v<1.5 else "🟠"
                         if l=="Fwd P/E": c="🟢" if 0<v<20 else "🟠"
-                    with cols[i]: st.metric(l, f"{c} {v:.2f}" if v else "-", help=f"Bron: {s}")
+                        if l=="ROE": c="🟢" if v>0.15 else "🟠"
+                        if l=="Current": c="🟢" if v>1.5 else "🟠"
+                        if l=="D/E": c="🟢" if v<1 else "🟠"
+                        if l=="Dividend": c="🟢" if v>0.03 else "🔵"
+                        if l=="Marge": c="🟢" if v>0.2 else "🟠"
+                    with cols[i]: st.metric(l, f"{c} {f.format(v)}" if v else "-", help=f"Bron: {s}\n{TOOLTIPS.get(k,'')}")
                 
                 dm(0, "PEG", peg, peg_s, 'peg')
                 dm(1, "Fwd P/E", fwd, fwd_s, 'fwd_pe')
-                dm(2, "ROE", roe, roe_s, 'roe')
-                dm(3, "P/B", pb, pb_s, 'pb')
+                dm(2, "ROE", roe, roe_s, 'roe', "{:.1%}")
+                dm(3, "Dividend", dy, dy_s, 'div', "{:.2%}")
+                
+                cols2 = st.columns(4)
+                def dm2(i, l, v, s, k, f="{:.2f}"):
+                    c = "⚪"
+                    with cols2[i]: st.metric(l, f.format(v) if v else "-", help=f"Bron: {s}")
+                
+                dm2(0, "Current", cr, cr_s, 'cr')
+                dm2(1, "D/E", de, de_s, 'de')
+                dm2(2, "P/B", pb, pb_s, 'pb')
+                dm2(3, "Marge", marg, marg_s, 'margin', "{:.1%}")
 
                 st.plotly_chart(px.line(x=hist.index, y=hist['Close']), use_container_width=True)
                 
                 cn, cv = st.columns(2)
                 with cn:
                     st.markdown("##### 📰 Nieuws")
-                    for n in get_news(safe_get(inf, 'shortName', sel)):
+                    for n in get_google_news(safe_get(info, 'shortName', sel)):
                         st.markdown(f"[{n['title']}]({n['link']})")
+                        st.divider()
                 with cv:
                     st.markdown("##### 📺 Video")
-                    u = f"https://www.youtube.com/results?search_query={sel}+stock+analysis"
-                    st.markdown(f"👉 [Zoek op YouTube]({u})")
-
+                    vid = get_youtube_video_id(safe_get(info, 'shortName', sel))
+                    if vid: st.video(f"https://www.youtube.com/watch?v={vid}")
         except Exception as e: st.error(f"Fout: {e}")
 
 # ==================================================
@@ -363,7 +441,9 @@ with tabs[1]:
         sd = {}
         dc = []
         
-        for item in st.session_state['portfolio']:
+        bar = st.progress(0)
+        items = st.session_state['portfolio']
+        for i, item in enumerate(items):
             try:
                 t = item['ticker']
                 tk = yf.Ticker(t)
@@ -386,10 +466,12 @@ with tabs[1]:
                     dye = dr * r * item['amount']
                     ex = safe_get(tk.info, 'exDividendDate')
                     exs = datetime.fromtimestamp(ex).strftime('%d-%m') if ex else "-"
-                    dc.append({"Aandeel": t, "Ex": exs, "Jaar (€)": dye})
+                    dc.append({"Aandeel": t, "Datum": exs, "Bedrag": dye})
 
                 rows.append({"Naam": t, "Aantal": item['amount'], "Prijs": f"€{cur:.2f}", "Waarde": f"€{v:.2f}", "Winst": f"€{v-c:.2f}"})
             except: pass
+            bar.progress((i+1)/len(items))
+        bar.empty()
         
         k1, k2 = st.columns(2)
         k1.metric("Waarde", f"€ {tv:,.2f}")
@@ -401,10 +483,11 @@ with tabs[1]:
         with c2:
             if dc:
                 dfd = pd.DataFrame(dc)
-                st.metric("Mnd Inkomen", f"€ {dfd['Jaar (€)'].sum()/12:.2f}")
+                st.metric("Mnd Inkomen", f"€ {dfd['Bedrag'].sum()/12:.2f}")
                 st.dataframe(dfd, hide_index=True)
         
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        
         if st.button("Wissen"): st.session_state['portfolio'] = []; st.rerun()
         
         with st.expander("🧮 Calculator"):
@@ -453,7 +536,7 @@ with tabs[3]:
     c1, c2 = st.columns(2)
     with c1:
         yr = st.selectbox("Jaar", [2023, 2024, 2025])
-        d = {"invest": 6.04, "tax": 36} # Defaults
+        d = TAX_DEFAULTS.get(yr, {"invest": 6.04, "tax": 36})
         fr = st.number_input("Fictief %", value=d["invest"])
         tr = st.number_input("Tax %", value=float(d["tax"]))
     with c2:

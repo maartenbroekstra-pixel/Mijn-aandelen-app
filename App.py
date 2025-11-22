@@ -17,7 +17,7 @@ st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- CONSTANTEN & MAPPING ---
+# --- MAPPING (EU -> US) ---
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -27,7 +27,7 @@ EU_TO_US_MAP = {
     "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "IMCD.AS": "IMCDY"
 }
 
-# Standaardwaarden Belastingdienst (kunnen nu overschreven worden)
+# --- CONSTANTEN ---
 TAX_DEFAULTS = {
     2023: {"invest": 6.17, "tax": 32},
     2024: {"invest": 6.04, "tax": 36},
@@ -35,15 +35,16 @@ TAX_DEFAULTS = {
 }
 
 TOOLTIPS = {
-    "peg": "Prijs/Winst gedeeld door Groei.\n🟢 < 1.5: Goedkoop.\n🔴 Negatief: Krimp.",
-    "fwd_pe": "Verwachte K/W.\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Duur.",
-    "roe": "Rendement Eigen Vermogen.\n🟢 > 15%: Sterk.",
+    "peg": "Prijs/Winst gedeeld door Groei (5jr).\n🟢 < 1.5: Goedkoop.\n🔴 Negatief: Krimp.",
+    "fwd_pe": "Verwachte K/W komend jaar.\n🟢 < 20: Aantrekkelijk.\n🟠 > 30: Premie.",
+    "roe": "Rendement op Eigen Vermogen.\n🟢 > 15%: Sterk management.",
     "de": "Schuldratio.\n🟢 < 1.0: Gezond.\n🔴 > 2.0: Veel schulden.",
-    "cr": "Liquiditeit.\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
-    "pb": "Prijs/Boekwaarde.\n🟢 < 3: Redelijk.",
-    "div": "Dividend.\n🟢 > 3%: Hoog.",
-    "beta": "Volatiliteit.\n🟢 < 0.8: Stabiel.",
-    "rsi": "Momentum.\n🟢 < 30: Koopkans?."
+    "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
+    "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk.",
+    "div": "Dividend Rendement.\n🟢 > 3%: Hoog inkomen.",
+    "beta": "Volatiliteit.\n🟢 < 0.8: Stabiel.\n🔴 > 1.5: Wild.",
+    "rsi": "Momentum.\n🟢 < 30: Koopkans?.",
+    "margin": "Winstmarge.\n🟢 > 20%: Zeer winstgevend."
 }
 
 # --- HULPFUNCTIES ---
@@ -51,8 +52,7 @@ TOOLTIPS = {
 def get_currency_rate(from_curr, to_curr="EUR"):
     if from_curr == to_curr or not from_curr: return 1.0
     try:
-        ticker = f"{from_curr}{to_curr}=X"
-        if from_curr == "USD" and to_curr == "EUR": ticker = "EUR=X"
+        ticker = "EUR=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
@@ -64,7 +64,7 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 def safe_get(d, k, default=None):
     return d.get(k) if d and d.get(k) is not None else default
 
-def truncate_text(text, max_len=20):
+def truncate_text(text, max_len=25):
     if text and len(text) > max_len: return text[:max_len] + ".."
     return text
 
@@ -183,11 +183,11 @@ def handle_upload():
     if uploaded_file:
         try:
             uploaded_file.seek(0)
-            data = json.load(uploaded_file)
-            if isinstance(data, dict):
-                st.session_state['portfolio'] = data.get('portfolio', [])
-                st.session_state['wishlist'] = data.get('wishlist', [])
-            st.toast("✅ Data geladen!")
+            d = json.load(uploaded_file)
+            if isinstance(d, dict):
+                st.session_state['portfolio'] = d.get('portfolio', [])
+                st.session_state['wishlist'] = d.get('wishlist', [])
+            st.toast("✅ Data geladen!", icon="💾")
         except: st.error("Fout bestand.")
 
 def get_json_data():
@@ -267,14 +267,23 @@ with tabs[0]:
                         except: pass
                 if dy and dy > 0.5: dy /= 100
 
+                beta = safe_get(minfo, 'beta')
+                rsi_val = 50 # Default
+                if len(hist) > 14:
+                    d = hist['Close'].diff()
+                    g = d.where(d>0, 0).rolling(14).mean()
+                    l = -d.where(d<0, 0).rolling(14).mean()
+                    rs = g/l
+                    rsi_val = (100 - (100/(1+rs))).iloc[-1]
+
                 sd = {'peg': peg, 'fwd_pe': fwd, 'roe': roe, 'de': de, 'cr': cr, 'pb': pb}
                 score, opps, risks = calculate_ai_score(sd)
 
-                # UI
+                # HEADER
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 with c1: 
                     st.title(truncate_text(safe_get(info, 'shortName', sel)))
-                    st.caption(f"{sel} | Data: {mt}")
+                    st.caption(f"{sel} (Data via {mt})")
                 with c2: st.metric("Prijs", f"€ {price:.2f}")
                 with c3: st.metric("Doel", f"€ {tgt:.2f}" if tgt else "-", help=f"Bron: {tgt_s}")
                 with c4:
@@ -289,23 +298,51 @@ with tabs[0]:
                             st.session_state['wishlist'].append({'ticker': sel, 'name': safe_get(info, 'shortName')})
                             st.rerun()
 
+                # SCORE
                 col = "green" if score>=7 else "orange" if score>=5.5 else "red"
                 st.markdown(f"""
-                <div style="display:flex; align-items:center; gap: 15px; margin: 10px 0;">
-                    <div style="min-width:70px; height:70px; border-radius:50%; border:5px solid {col}; display:flex; align-items:center; justify-content:center;">
+                <div style="display:flex; align-items:center; gap: 20px; margin: 20px 0;">
+                    <div style="min-width:80px; height:80px; border-radius:50%; border:5px solid {col}; display:flex; align-items:center; justify-content:center;">
                         <span style="font-size:24px; font-weight:bold; color:{col}">{score:.1f}</span>
                     </div>
-                    <div><small>✅ {', '.join(opps) if opps else '-'}<br>⚠️ {', '.join(risks) if risks else '-'}</small></div>
-                </div>""", unsafe_allow_html=True)
+                    <div>
+                        <span style="color:green">✅ {', '.join(opps) if opps else 'Geen uitschieters'}</span><br>
+                        <span style="color:red">⚠️ {', '.join(risks) if risks else 'Geen grote risico\'s'}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
-                cols = st.columns(4)
-                def dm(i, l, v, s, k, f="{:.2f}"):
-                    with cols[i]: st.metric(l, f.format(v) if v else "-", help=f"Bron: {s}\n\n{TOOLTIPS.get(k,'')}")
+                # METRICS MET KLEUREN
+                cols = st.columns(5)
                 
-                dm(0, "PEG", peg, peg_s, 'peg')
-                dm(1, "Fwd P/E", fwd, fwd_s, 'fwd_pe')
-                dm(2, "ROE", roe, roe_s, 'roe', "{:.1%}")
-                dm(3, "Dividend", dy, dy_s, 'div', "{:.2%}")
+                def dm(i, l, v, s, k, f="{:.2f}", cl=None):
+                    if v is None: 
+                        with cols[i]: st.metric(l, "N/A", help=f"Bron: {s}")
+                        return
+                    
+                    icon = "⚪"
+                    if cl:
+                        r = cl(v)
+                        if r == "g": icon = "🟢"
+                        elif r == "o": icon = "🟠"
+                        elif r == "r": icon = "🔴"
+                        elif r == "b": icon = "🔵"
+                    
+                    with cols[i]:
+                        st.metric(l, f"{icon} {f.format(v)}", help=f"Bron: {s}\n\n{TOOLTIPS.get(k, '')}")
+
+                dm(0, "PEG", peg, peg_s, 'peg', cl=lambda x: "g" if 0<x<1.5 else ("o" if x<0 else "y"))
+                dm(1, "Fwd P/E", fwd, fwd_s, 'fwd_pe', cl=lambda x: "g" if 0<x<20 else "y")
+                dm(2, "ROE", roe, roe_s, 'roe', "{:.1%}", cl=lambda x: "g" if x>0.15 else "y")
+                dm(3, "D/E", de, de_s, 'de', cl=lambda x: "g" if x<1 else "o")
+                dm(4, "Current", cr, cr_s, 'cr', cl=lambda x: "g" if x>1.5 else "o")
+                
+                # 2e Rij
+                cols = st.columns(5)
+                dm(0, "P/B", pb, pb_s, 'pb', cl=lambda x: "g" if 0<x<3 else "y")
+                dm(1, "Dividend", dy, dy_s, 'div', "{:.2%}", cl=lambda x: "g" if x>0.03 else "b")
+                dm(2, "RSI", rsi_val, "Yahoo", 'rsi', "{:.0f}", cl=lambda x: "g" if x<30 else "y")
+                dm(3, "Beta", beta, "Yahoo", 'beta', "{:.2f}", cl=lambda x: "g" if x<0.8 else "o")
                 
                 st.plotly_chart(px.line(x=hist.index, y=hist['Close']), use_container_width=True)
                 
@@ -327,16 +364,19 @@ with tabs[0]:
 with tabs[1]:
     if st.session_state['portfolio']:
         rows = []
-        tv = 0
-        ti = 0
+        sec_dist = {}
+        div_cal = []
+        tv, ti = 0, 0
         
-        for item in st.session_state['portfolio']:
+        bar = st.progress(0)
+        for i, item in enumerate(st.session_state['portfolio']):
             try:
                 t = item['ticker']
-                tick = yf.Ticker(t)
-                h = tick.history(period="1d")
+                tk = yf.Ticker(t)
+                h = tk.history(period="1d")
+                
                 if not h.empty:
-                    r = get_currency_rate(safe_get(tick.info, 'currency', 'EUR'), "EUR")
+                    r = get_currency_rate(safe_get(tk.info, 'currency', 'EUR'), "EUR")
                     cur = h['Close'].iloc[-1] * r
                 else: cur = item['avg_price_eur']
                 
@@ -344,16 +384,53 @@ with tabs[1]:
                 c = item['avg_price_eur'] * item['amount']
                 tv += v
                 ti += c
+                
+                # Sector
+                s = safe_get(tk.info, 'sector', 'Overig')
+                sec_dist[s] = sec_dist.get(s, 0) + v
+                
+                # Dividend
+                dr = safe_get(tk.info, 'dividendRate')
+                if dr:
+                    # Rate is in local currency
+                    dy_e = dr * r * item['amount']
+                    ex = safe_get(tk.info, 'exDividendDate')
+                    exs = datetime.fromtimestamp(ex).strftime('%d-%m') if ex else "-"
+                    div_cal.append({"Aandeel": t, "Datum": exs, "Bedrag": dy_e})
+
                 rows.append({"Naam": t, "Aantal": item['amount'], "Prijs": f"€{cur:.2f}", "Waarde": f"€{v:.2f}", "Winst": f"€{v-c:.2f}"})
             except: pass
+            bar.progress((i+1)/len(st.session_state['portfolio']))
+        bar.empty()
         
-        k1, k2 = st.columns(2)
+        k1, k2, k3 = st.columns(3)
         k1.metric("Waarde", f"€ {tv:,.2f}")
         k2.metric("Winst", f"€ {tv-ti:,.2f}", delta=f"{((tv-ti)/ti)*100:.1f}%" if ti else "0%")
+        k3.metric("Inleg", f"€ {ti:,.2f}")
+        
+        st.divider()
+        
+        cp, cd = st.columns(2)
+        with cp:
+            st.subheader("Verdeling")
+            if sec_dist and tv > 0:
+                fig = px.pie(values=list(sec_dist.values()), names=list(sec_dist.keys()), hole=0.4)
+                fig.update_layout(margin=dict(t=0,b=0,l=0,r=0), height=200)
+                st.plotly_chart(fig, use_container_width=True)
+        with cd:
+            st.subheader("Dividend")
+            if div_cal:
+                dfd = pd.DataFrame(div_cal)
+                st.metric("Maandelijks", f"€ {dfd['Bedrag'].sum()/12:.2f}")
+                st.dataframe(dfd, hide_index=True, use_container_width=True)
+            else: st.info("Geen dividend.")
+
+        st.subheader("Details")
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
         
         if st.button("Alles Wissen"): st.session_state['portfolio'] = []; st.rerun()
         
+        st.divider()
         with st.expander("🧮 Calculator"):
             c1, c2, c3 = st.columns(3)
             m = c1.number_input("Mnd Inleg", 500)
@@ -371,67 +448,68 @@ with tabs[2]:
         for item in st.session_state['wishlist']:
             t = item['ticker']
             try:
-                tick = yf.Ticker(t)
-                h = tick.history(period="2d")
+                tk = yf.Ticker(t)
+                h = tk.history(period="2d")
                 if not h.empty:
-                    r = get_currency_rate(safe_get(tick.info, 'currency', 'EUR'), "EUR")
+                    r = get_currency_rate(safe_get(tk.info, 'currency', 'EUR'), "EUR")
                     cp = h['Close'].iloc[-1] * r
                     ch = ((cp - h['Close'].iloc[0] * r) / (h['Close'].iloc[0] * r)) * 100
                     col = "green" if ch >= 0 else "red"
                     
-                    c1, c2 = st.columns([3, 1])
-                    with c1: st.markdown(f"**{item['name']}**\n€{cp:.2f} (:{col}[{ch:+.1f}%])")
-                    with c2:
-                        if st.button("🔎", key=f"w_{t}"):
-                            st.session_state['search_query'] = t
-                            st.rerun()
-                    st.divider()
+                    # Score Lite
+                    pe = safe_get(tk.info, 'trailingPE')
+                    g = safe_get(tk.info, 'earningsGrowth')
+                    pg = pe/(g*100) if pe and g else None
+                    sd = {'peg': pg, 'roe': safe_get(tk.info, 'returnOnEquity')}
+                    sc, _, _ = calculate_ai_score(sd)
+                    sc_col = "green" if sc>=7 else "orange" if sc>=5.5 else "red"
+                    
+                    st.markdown(f"""
+                    <div style="border:1px solid #333; border-radius:10px; padding:10px; margin-bottom:10px; background-color:#262730;">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="flex:2;"><b>{item['name']}</b><br><span style='color:gray;font-size:0.8em'>{t}</span></div>
+                            <div style="flex:1; text-align:right;"><b>€{cp:.2f}</b> <span style='color:{col}'>{ch:+.1f}%</span></div>
+                            <div style="flex:1; text-align:right;"><b style='color:{sc_col}'>{sc:.1f}</b> AI</div>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+                    
+                    if st.button("🔎", key=f"wl_{t}"):
+                        st.session_state['search_query'] = t
+                        st.rerun()
             except: pass
         if st.button("Legen", key="wl_clr"): st.session_state['wishlist'] = []; st.rerun()
     else: st.info("Leeg.")
 
 # ==================================================
-# 4. BELASTING (NIEUW)
+# 4. BELASTING
 # ==================================================
 with tabs[3]:
-    st.header("🇳🇱 Box 3 (Beleggingen)")
+    st.header("🇳🇱 Box 3")
+    c1, c2 = st.columns(2)
+    with c1:
+        yr = st.selectbox("Jaar", [2023, 2024, 2025])
+        defs = TAX_DEFAULTS.get(yr, {"invest": 6.04, "tax": 36})
+        fr = st.number_input("Fictief %", value=defs["invest"], step=0.01)
+        tr = st.number_input("Tax %", value=float(defs["tax"]), step=0.1)
+    with c2:
+        sv = st.number_input("Startwaarde (1 jan)", value=0.0, step=100.0)
+        ev = st.number_input("Eindwaarde (31 dec)", value=0.0, step=100.0)
+        dep = st.number_input("Netto Inleg", value=0.0, step=100.0)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        year = st.selectbox("Jaar", [2023, 2024, 2025])
-        defs = TAX_DEFAULTS.get(year, {"invest": 6.04, "tax": 36})
-        
-        fict_rate = st.number_input("Fictief Rendement (%)", value=defs["invest"], step=0.01)
-        tax_rate = st.number_input("Belastingtarief (%)", value=float(defs["tax"]), step=0.1)
-        
-    with col2:
-        start_val = st.number_input("Waarde 1 jan (€)", value=0.0, step=100.0)
-        end_val = st.number_input("Waarde 31 dec (€)", value=0.0, step=100.0)
-        deposits = st.number_input("Netto Inleg (€)", value=0.0, step=100.0)
-        
+    real = (ev - sv) - dep
+    avg = sv + (dep / 2)
+    rp = (real / avg * 100) if avg > 0 else 0
+    
+    taxable = (sv * fr) / 100
+    due = (taxable * tr) / 100
+    
     st.divider()
+    c3, c4 = st.columns(2)
+    with c3:
+        col = "green" if real > taxable else "red"
+        st.metric("Werkelijk", f"€ {real:,.2f}", delta=f"{rp:.2f}%")
+    with c4:
+        st.metric("Belasting", f"€ {due:,.2f}", help=f"Fictief rendement: € {taxable:,.2f}")
     
-    # Berekening Werkelijk
-    real_gain = (end_val - start_val) - deposits
-    avg_cap = start_val + (deposits / 2) # Simpele benadering
-    real_pct = (real_gain / avg_cap * 100) if avg_cap > 0 else 0
-    
-    # Berekening Fiscus
-    # De fiscus kijkt naar de waarde op 1 januari (peildatum)
-    taxable_gain = (start_val * fict_rate) / 100
-    tax_due = (taxable_gain * tax_rate) / 100
-    
-    c_res1, c_res2 = st.columns(2)
-    with c_res1:
-        color = "green" if real_gain > taxable_gain else "red"
-        st.metric("Werkelijk Rendement", f"€ {real_gain:,.2f}", delta=f"{real_pct:.2f}%")
-        st.caption("Jouw echte winst (Koerswinst + Dividend)")
-        
-    with c_res2:
-        st.metric("Belasting (Box 3)", f"€ {tax_due:,.2f}", help=f"Over fictief rendement van € {taxable_gain:,.2f}")
-        st.caption(f"Te betalen aan fiscus (o.b.v. {fict_rate}%)")
-
-    if real_gain > taxable_gain:
-        st.success(f"🎉 Je hebt de fiscus verslagen! Je echte rendement is hoger dan het fictieve rendement.")
-    elif real_gain < taxable_gain:
-        st.warning("Let op: Je betaalt belasting over winst die je niet hebt gemaakt (Fictief > Werkelijk).")
+    if real > taxable: st.success("Gewonnen van de fiscus!")
+    else: st.warning("Fictief > Werkelijk")

@@ -245,12 +245,13 @@ class DataEngine:
         
         avg_val = sum(values) / len(values)
         
-        # Percentage correctie
-        # Als we een percentage verwachten (bijv dividend), maar de waarde is < 0.25 (bijv 0.05),
-        # dan is het waarschijnlijk een factor (0.05 * 100 = 5%).
-        # Als de waarde al > 0.25 is (bijv 5.5), laten we hem staan.
+        # Percentage correctie (ROBUUST)
+        # Als we een percentage verwachten (ROE, Marge, Dividend):
+        # Als de absolute waarde <= 1.0 is (bv 0.34 of -0.05), gaan we ervan uit dat het een decimale fractie is.
+        # Dan vermenigvuldigen we met 100 (0.34 wordt 34%).
+        # Als de waarde groter is dan 1 (bv 15.5), laten we het staan.
         if is_percent:
-            if avg_val < 0.25:
+            if abs(avg_val) <= 1.0 and avg_val != 0:
                 avg_val *= 100
         
         source_str = " & ".join(sources)
@@ -324,8 +325,6 @@ if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
         if 'p' in loaded_data: st.session_state['portfolio'] = loaded_data['p']
         if 'w' in loaded_data: st.session_state['wishlist'] = loaded_data['w']
         st.toast("Data succesvol geladen! Voeg nu gerust nieuwe aandelen toe.", icon="✅")
-        # Optioneel: st.rerun() om direct de tabellen te updaten, 
-        # maar Streamlit doet dit meestal al na een knopdruk.
     except Exception as e:
         st.error(f"Fout bij laden bestand: {e}")
 

@@ -40,36 +40,8 @@ TOOLTIPS = {
     "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend."
 }
 
-# Jouw portfolio data
-DEFAULT_PORTFOLIO = [
-    {"ticker": "LAZR", "amount": 61.87, "avg_price": 13.979733724594116, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "HEIA.AS", "amount": 13.588, "avg_price": 73.59, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "SHELL.AS", "amount": 34.84, "avg_price": 28.7, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "MSFT", "amount": 2.87, "avg_price": 401.1400529623032, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "BESI.AS", "amount": 9.68, "avg_price": 103.35, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "9PDA.DU", "amount": 12.14, "avg_price": 90.59, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "VOW3.DE", "amount": 15.58, "avg_price": 96.31, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "VWCE.DE", "amount": 12.59, "avg_price": 123.78, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "CRM", "amount": 9.19, "avg_price": 250.7370033931732, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "JNJ", "amount": 10.87, "avg_price": 158.86689165115357, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "ORCL", "amount": 11.32, "avg_price": 152.59098153591154, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "AMD", "amount": 11.98, "avg_price": 96.11930593013763, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "D9Z.F", "amount": 57.39, "avg_price": 43.56, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "BIDU", "amount": 25.5, "avg_price": 92.58406848907471, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "AMZN", "amount": 13.93, "avg_price": 206.59835482120513, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "LLY", "amount": 3.23, "avg_price": 712.3215557956696, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "SSU.F", "amount": 2.25, "avg_price": 888.32, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "PFE", "amount": 144.68, "avg_price": 25.069094166755676, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "PEP", "amount": 26.56, "avg_price": 151.73883961200715, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "BABA", "amount": 31.45, "avg_price": 109.84570016384124, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "PYPL", "amount": 81.24, "avg_price": 70.87748029232024, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "WKL.AS", "amount": 49.24, "avg_price": 121.85, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "ASML.AS", "amount": 5.56, "avg_price": 629.12, "currency": "EUR", "symbol": "€"}, 
-    {"ticker": "JD", "amount": 192.53, "avg_price": 34.38507817268371, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "NVO", "amount": 119.0, "avg_price": 55.981576588153835, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "GOOG", "amount": 23.96, "avg_price": 168.23258237957955, "currency": "USD", "symbol": "$"}, 
-    {"ticker": "WEBN.DE", "amount": 1662.43, "avg_price": 10.08, "currency": "EUR", "symbol": "€"}
-]
+# Jouw portfolio data (Leeg gemaakt zoals gevraagd)
+DEFAULT_PORTFOLIO = []
 
 # ==================================================
 # 2. STATE MANAGEMENT
@@ -144,10 +116,14 @@ def get_extended_portfolio_data(ticker):
         else:
             q_type = 'Aandeel'
             
-        # 2. Earnings Beats (Met tijdzone fix)
+        # 2. Earnings Beats (Met tijdzone fix en US fallback voor betere data)
         earnings_surprise = None
         try:
-            dates = tk.earnings_dates
+            # Gebruik US ticker voor earnings data indien beschikbaar (betere dekking)
+            us_ticker = EU_TO_US_MAP.get(ticker, ticker)
+            earning_tk = yf.Ticker(us_ticker) if us_ticker != ticker else tk
+            
+            dates = earning_tk.earnings_dates
             if dates is not None and not dates.empty:
                 # Tijdzones strippen voor vergelijking
                 if dates.index.tz is not None:
@@ -216,7 +192,7 @@ def search_yahoo_strict(query):
         raw_quotes = data.get('quotes', [])
         for q in raw_quotes:
             symbol = q.get('symbol')
-            name = q.get('shortname') or q.get('longname') or symbol
+            name = q.get('shortname') or q.get('longname' ) or symbol
             results.append(f"{symbol} | {name}")
         return results
     except Exception:
@@ -225,8 +201,9 @@ def search_yahoo_strict(query):
 def get_google_news(query):
     try:
         # Bredere query (alleen naam) werkt vaak beter voor RSS
+        # HEADERS toegevoegd omdat Google RSS anders 403 geeft
         url = f"https://news.google.com/rss/search?q={query}&hl=nl&gl=NL&ceid=NL:nl"
-        r = requests.get(url, timeout=4)
+        r = requests.get(url, headers=HEADERS, timeout=4)
         root = ET.fromstring(r.content)
         items = []
         for i in root.findall('./channel/item')[:4]:

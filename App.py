@@ -38,7 +38,7 @@ TOOLTIPS = {
     "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
     "div": "Dividend Rendement.\n🟢 > 3%: Interessant.",
     "margin": "Nettowinstmarge.\n🟢 > 20%: Hoge winstmarge.",
-    "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend.",
+    "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend.\n🔴 < 0: Verlieslatend.",
     "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk."
 }
 
@@ -99,19 +99,12 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         return 1.0
 
 def search_yahoo_strict(query):
-    """
-    Zoekt aandelen via Yahoo Finance API.
-    Standaard sortering van Yahoo wordt gebruikt.
-    """
     try:
-        # Let op: region=US gezet voor bredere resultaten, of je kunt dit weglaten voor globaal
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&quotesCount=15"
         r = requests.get(url, headers=HEADERS, timeout=3)
         data = r.json()
         results = []
         raw_quotes = data.get('quotes', [])
-        
-        # GEEN Custom Sortering meer op .AS of .DE
         
         for q in raw_quotes:
             symbol = q.get('symbol')
@@ -180,8 +173,10 @@ class DataEngine:
         # Percentage Correctie
         if is_percent:
             if is_dividend:
+                # Dividend: < 0.6 betekent waarschijnlijk factor (0.05 -> 5)
                 if val < 0.6: return val * 100
             else:
+                # Andere percentages: < 1.0 betekent factor (0.15 -> 15)
                 if abs(val) <= 1.0 and val != 0: return val * 100
         
         return val
@@ -189,7 +184,6 @@ class DataEngine:
     def get_robust_peg(self):
         """
         Haalt PEG op uit Yahoo en Finviz.
-        GEEN eigen berekening meer.
         """
         values = []
         sources = []
@@ -245,43 +239,98 @@ class DataEngine:
         return avg_val, source_str
 
 # ==================================================
-# 5. AI SCORE LOGICA
+# 5. AI SCORE LOGICA (HERZIEN & GEWOGEN)
 # ==================================================
 def calculate_ai_score(data):
-    score = 0
-    count = 0
+    """
+    Berekent een score (0-10) op basis van een gewogen systeem.
+    Startpunt is 5.0 (Neutraal).
+    Er wordt strafpunten uitgedeeld voor verlieslatendheid en schulden.
+    """
+    score = 5.0 # Start neutraal
     reasons = []
     
-    rules = [
-        (data['peg'][0], "PEG", lambda x: 0 < x < 1.5, lambda x: x > 2.5, "Goedkoop gewaardeerd (PEG)", "Te duur (PEG)"),
-        (data['pe'][0], "P/E", lambda x: 0 < x < 20, lambda x: x > 40, "Aantrekkelijke P/E", "Hoge premie (P/E)"),
-        (data['roe'][0], "ROE", lambda x: x > 15, lambda x: x < 5, "Sterk rendement (ROE)", "Zwak management (ROE)"),
-        (data['de'][0], "D/E", lambda x: x < 1.0, lambda x: x > 2.0, "Gezonde balans", "Veel schulden"),
-        (data['cr'][0], "Current", lambda x: x > 1.5, lambda x: x < 0.9, "Goede liquiditeit", "Liquiditeitsproblemen?"),
-        (data['margin'][0], "Marge", lambda x: x > 15, lambda x: x < 2, "Hoge winstmarge", "Dunne marges"),
-        (data['eps'][0], "EPS", lambda x: x > 0, lambda x: x < 0, "Winstgevend", "Verlieslatend")
-    ]
+    # 1. Winstgevendheid (Cruciaal)
+    eps_val, _ = data['eps']
+    if eps_val is not None:
+        if eps_val > 0:
+            score += 1.0
+            reasons.append("Winstgevend")
+        else:
+            score -= 2.5 # Flinke straf voor verlieslatend
+            reasons.append("Verlieslatend (EPS < 0)")
     
-    for val, name, good, bad, g_msg, b_msg in rules:
-        if val is not None:
-            count += 1
-            if good(val): 
-                score += 1
-                reasons.append(g_msg)
-            elif bad(val):
-                reasons.append(b_msg)
-            else:
-                score += 0.5 # Neutraal
-            
-    final_score = (score / count) * 10 if count > 0 else 5.0
+    # 2. Waardering (PEG & PE)
+    peg_val, _ = data['peg']
+    if peg_val is not None:
+        if 0 < peg_val < 1.5:
+            score += 1.0
+            reasons.append("Goede PEG")
+        elif peg_val > 2.5:
+            score -= 0.5
+        elif peg_val < 0:
+            score -= 1.0 # Negatieve PEG is vaak slecht teken (negatieve groei of earnings)
+
+    pe_val, _ = data['pe']
+    if pe_val is not None:
+        if 0 < pe_val < 20:
+            score += 0.5
+        elif pe_val > 40:
+            score -= 0.5
+
+    # 3. Financiële Gezondheid (Balans)
+    de_val, _ = data['de']
+    if de_val is not None:
+        if de_val < 1.0:
+            score += 1.0
+            reasons.append("Gezonde Balans")
+        elif de_val > 2.0:
+            score -= 1.0
+            reasons.append("Veel Schulden")
+
+    cr_val, _ = data['cr']
+    if cr_val is not None:
+        if cr_val > 1.5:
+            score += 0.5
+        elif cr_val < 1.0:
+            score -= 0.5
+            reasons.append("Krap bij kas (Current < 1)")
+
+    # 4. Performance & Marges
+    margin_val, _ = data['margin']
+    if margin_val is not None:
+        if margin_val > 20: # Aangepast naar 20%
+            score += 1.0
+            reasons.append("Hoge Marges")
+        elif margin_val < 5:
+            score -= 0.5
+
+    roe_val, _ = data['roe']
+    if roe_val is not None:
+        if roe_val > 15:
+            score += 0.5
     
-    summary = "Het bedrijf scoort gemiddeld op basis van de fundamentals."
+    # 5. Dividend Bonus
+    div_val, _ = data['div']
+    if div_val is not None and div_val > 2.5:
+        score += 0.5
+        reasons.append("Mooi Dividend")
+
+    # Begrenzen tussen 0 en 10
+    final_score = max(0.0, min(10.0, score))
+    
+    # Samenvatting genereren
+    summary = "Het bedrijf scoort gemiddeld."
     if final_score >= 7.5:
-        summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:2]).lower()}."
-    elif final_score <= 4.5:
-        summary = f"Risicovol aandeel. Let op: {', '.join(reasons[:2]).lower()}."
+        summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:3]).lower()}."
+    elif final_score <= 4.0:
+        neg_reasons = [r for r in reasons if "Verlies" in r or "Schulden" in r or "Krap" in r]
+        if neg_reasons:
+            summary = f"Risicovol! Let op: {', '.join(neg_reasons).lower()}."
+        else:
+            summary = "De fundamentals zien er zwak uit op basis van de beschikbare data."
     elif reasons:
-        summary = f"Gemengd beeld. Plus: {reasons[0].lower()}, maar let op: {reasons[-1].lower()}."
+        summary = f"Gemengd beeld. Opvallend: {', '.join(reasons[:2]).lower()}."
     
     return round(final_score, 1), summary
 
@@ -431,7 +480,8 @@ with tabs[0]:
                 
                 c5, c6, c7, c8 = st.columns(4)
                 with c5: display_metric("ROE", 'roe', lambda x: x>15, lambda x: x<5, is_pct=True)
-                with c6: display_metric("Marge", 'margin', lambda x: x>15, lambda x: x<2, is_pct=True)
+                # Hier de aangepaste Marge check: x > 20
+                with c6: display_metric("Marge", 'margin', lambda x: x>20, lambda x: x<2, is_pct=True)
                 with c7: display_metric("Debt/Eq", 'de', lambda x: x<1, lambda x: x>2)
                 with c8: display_metric("Current", 'cr', lambda x: x>1.5, lambda x: x<1)
 

@@ -12,7 +12,7 @@ import numpy as np
 # ==========================================
 # 🔑 VUL HIER JE FMP KEY IN
 # ==========================================
-JOUW_FMP_KEY = ""  # Zet hier je key, bijv: "12345abcdef"
+JOUW_FMP_KEY = "nhXfJ0SDaXmUEVKy5icfcwzQOHqOn5QE"  # Zet hier je key, bijv: "12345abcdef"
 # ==========================================
 
 # --- CONFIGURATIE ---

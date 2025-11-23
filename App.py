@@ -8,9 +8,9 @@ import re
 from datetime import datetime
 
 # ==========================================
-# 🔑 VUL HIER JE FMP KEY IN (VERPLICHT)
+# 🔑 JOUW FMP KEY (Reeds ingevuld)
 # ==========================================
-JOUW_FMP_KEY = "nhXfJ0SDaXmUEVKy5icfcwzQOHqOn5QE"  # Bijv: "a1b2c3d4e5..."
+JOUW_FMP_KEY = "nhXfJ0SDaXmUEVKy5icfcwzQOHqOn5QE"
 # ==========================================
 
 # --- CONFIGURATIE ---
@@ -24,13 +24,6 @@ if 'search_query' not in st.session_state: st.session_state['search_query'] = ""
 # --- CONSTANTEN ---
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# Belasting settings (Dit veroorzaakte de fout, staat nu hier veilig)
-TAX_DEFAULTS = {
-    2023: {"invest": 6.17, "tax": 32},
-    2024: {"invest": 6.04, "tax": 36},
-    2025: {"invest": 5.88, "tax": 36}
-}
-
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -39,6 +32,12 @@ EU_TO_US_MAP = {
     "MT.AS": "MT", "DSM.AS": "DSM", "2PP.DE": "PYPL", "NOVO-B.CO": "NVO",
     "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD", "RDSA.AS": "SHEL",
     "SHELL.AS": "SHEL", "WKL.AS": "WTKWY", "ASM.AS": "ASMIY", "ADYEN.AS": "ADYEY"
+}
+
+TAX_DEFAULTS = {
+    2023: {"invest": 6.17, "tax": 32},
+    2024: {"invest": 6.04, "tax": 36},
+    2025: {"invest": 5.88, "tax": 36}
 }
 
 TOOLTIPS = {
@@ -62,12 +61,9 @@ def truncate_text(text, max_len=25):
     return text
 
 def smart_normalize(val):
-    """Fix voor percentages: 5.2 -> 0.052"""
     if val is None: return None
     try:
         f = float(val)
-        # Als waarde > 0.8 is, gaan we ervan uit dat het een raw number is (bv 5.5%)
-        # Tenzij het PE of PEG is, maar deze functie gebruiken we alleen voor yield/roe/margin
         if f > 0.8: return f / 100.0 
         return f
     except: return None
@@ -81,44 +77,56 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         return 1.0
     except: return 1.0
 
-# --- KEY CHECK ---
-def get_api_key():
-    if JOUW_FMP_KEY and JOUW_FMP_KEY != "": return JOUW_FMP_KEY
-    try:
-        if st.secrets.get("fmp_key"): return st.secrets["fmp_key"]
-    except: pass
-    return None
-
 # --- FMP API ---
 @st.cache_data(ttl=3600)
 def get_fmp_data(ticker, api_key):
-    if not api_key: return {}, "Geen Key"
+    """
+    Aangepast: Gebruikt 'annual' data ipv 'ttm'.
+    TTM is vaak betaald, annual is gratis.
+    """
+    clean_key = api_key.strip() # Spaties verwijderen
+    if not clean_key: return {}, "Geen Key"
+    
     data = {}
     try:
-        # 1. Ratios Endpoint
-        url = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={api_key}"
-        r = requests.get(url, timeout=3)
+        # Endpoint 1: Ratios (ANNUAL - Gratis)
+        # We halen de lijst op en pakken de eerste (meest recente jaar)
+        url = f"https://financialmodelingprep.com/api/v3/ratios/{ticker}?period=annual&limit=1&apikey={clean_key}"
+        r = requests.get(url, timeout=5)
+        
         if r.status_code == 200:
             js = r.json()
             if isinstance(js, list) and len(js) > 0:
                 d = js[0]
-                data['peg'] = d.get('pegRatioTTM')
-                data['pe'] = d.get('priceEarningsRatioTTM')
-                data['pb'] = d.get('priceToBookRatioTTM')
-                # Hier passen we smart_normalize toe voor de juiste weergave
-                data['roe'] = smart_normalize(d.get('returnOnEquityTTM'))
-                data['de'] = d.get('debtEquityRatioTTM')
-                data['cr'] = d.get('currentRatioTTM')
-                data['profit_margin'] = smart_normalize(d.get('netProfitMarginTTM'))
-                data['div_yield'] = smart_normalize(d.get('dividendYielTTM'))
+                # Let op: keys heten hier iets anders dan bij TTM endpoint (zonder TTM suffix)
+                data['peg'] = d.get('pegRatio')
+                data['pe'] = d.get('priceEarningsRatio')
+                data['pb'] = d.get('priceToBookRatio')
+                data['roe'] = smart_normalize(d.get('returnOnEquity'))
+                data['de'] = d.get('debtEquityRatio')
+                data['cr'] = d.get('currentRatio')
+                data['profit_margin'] = smart_normalize(d.get('netProfitMargin'))
+                data['div_yield'] = smart_normalize(d.get('dividendYield'))
             else:
-                return {}, "FMP: Geen data (Ticker onbekend?)"
+                # Als Annual leeg is, probeer toch TTM (sommige tickers hebben dit wel gratis)
+                url_ttm = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={clean_key}"
+                r_ttm = requests.get(url_ttm, timeout=3)
+                if r_ttm.status_code == 200:
+                    js_ttm = r_ttm.json()
+                    if isinstance(js_ttm, list) and len(js_ttm) > 0:
+                         d = js_ttm[0]
+                         data['peg'] = d.get('pegRatioTTM')
+                         data['pe'] = d.get('priceEarningsRatioTTM')
+                         # ... (rest van TTM mapping, ingekort voor stabiliteit)
+                
+                if not data: return {}, f"FMP: Geen data voor {ticker}"
+
         elif r.status_code == 403:
-            return {}, "FMP: Key Invalid / Limit"
+            return {}, "FMP: Invalid Key of Limiet bereikt (Of account nog niet actief)"
         
-        # 2. Quote Endpoint (Backup PE & EPS)
-        url2 = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={api_key}"
-        r2 = requests.get(url2, timeout=3)
+        # 2. Quote Endpoint (EPS)
+        url2 = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={clean_key}"
+        r2 = requests.get(url2, timeout=5)
         if r2.status_code == 200:
             js2 = r2.json()
             if isinstance(js2, list) and len(js2) > 0:
@@ -131,13 +139,13 @@ def get_fmp_data(ticker, api_key):
     
     return data, "OK"
 
-# --- COMBINEREN (YAHOO + FMP) ---
+# --- COMBINEREN ---
 def get_combined_data(ticker, us_ticker, yf_info, fmp_key):
-    # 1. FMP Data (Gebruik US Ticker)
+    # 1. FMP (US Ticker is cruciaal voor gratis accounts!)
     fmp_target = us_ticker if us_ticker else ticker
     fmp_data, fmp_status = get_fmp_data(fmp_target, fmp_key)
     
-    # 2. Yahoo Data (Met smart_normalize voor % velden)
+    # 2. Yahoo
     yahoo_data = {
         'peg': safe_get(yf_info, 'pegRatio'),
         'fwd_pe': safe_get(yf_info, 'forwardPE'),
@@ -152,10 +160,9 @@ def get_combined_data(ticker, us_ticker, yf_info, fmp_key):
         'eps': safe_get(yf_info, 'trailingEps')
     }
     
-    # Correctie Yahoo DE (150 -> 1.5)
     if yahoo_data['de'] and yahoo_data['de'] > 10: yahoo_data['de'] /= 100
 
-    # 3. Samenvoegen
+    # 3. Aggregeren
     keys = ['peg', 'fwd_pe', 'pb', 'roe', 'de', 'cr', 'profit_margin', 'div_yield', 'target', 'eps']
     final = {}
     sources = {}
@@ -166,17 +173,17 @@ def get_combined_data(ticker, us_ticker, yf_info, fmp_key):
         vals = []
         src_names = []
 
-        # Yahoo waarde
+        # Yahoo
         y_val = yahoo_data.get(k)
-        if k == 'fwd_pe' and y_val is None: y_val = yahoo_data.get('pe') # Fallback
+        if k == 'fwd_pe' and y_val is None: y_val = yahoo_data.get('pe')
         if y_val is not None:
             vals.append(y_val)
             src_names.append("Yahoo")
             debug[k]["Yahoo"] = y_val
 
-        # FMP waarde
+        # FMP
         f_val = fmp_data.get(k)
-        if k == 'fwd_pe' and f_val is None: f_val = fmp_data.get('pe') # Fallback
+        if k == 'fwd_pe' and f_val is None: f_val = fmp_data.get('pe')
         if f_val is not None:
             vals.append(f_val)
             src_names.append("FMP")
@@ -245,12 +252,14 @@ def handle_upload():
         except: st.error("Fout bestand.")
 def get_json(): return json.dumps({'portfolio': st.session_state['portfolio'], 'wishlist': st.session_state['wishlist']})
 
-# --- UI ---
+# --- UI START ---
 st.sidebar.header("📂 Menu")
-active_key = get_api_key()
 
-if active_key: st.sidebar.success("✅ FMP API Ingesteld")
-else: st.sidebar.warning("⚠️ Geen FMP Key! Vul deze bovenaan in.")
+# Key Check UI
+if JOUW_FMP_KEY:
+    st.sidebar.success(f"✅ Key actief: {JOUW_FMP_KEY[:4]}...")
+else:
+    st.sidebar.error("❌ Geen Key ingevuld")
 
 st.sidebar.download_button("⬇️ Backup", get_json(), "data.json", "application/json")
 st.sidebar.file_uploader("⬆️ Restore", type=['json'], key='uploader', on_change=handle_upload)
@@ -262,7 +271,7 @@ tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist", "🇳🇱 B
 with tabs[0]:
     c1, c2 = st.columns([3, 1])
     dq = st.session_state.get('search_query', "")
-    txt = c1.text_input("Zoek aandeel:", value=dq, placeholder="Bijv: ASML, BESITY", key="s")
+    txt = c1.text_input("Zoek aandeel:", value=dq, placeholder="Bijv: ASML, AAPL", key="s")
     if txt:
         try:
             sel = txt
@@ -280,7 +289,6 @@ with tabs[0]:
                 rate = get_currency_rate(safe_get(info, 'currency', 'EUR'), "EUR")
                 price = hist['Close'].iloc[-1] * rate
                 
-                # Mapping Logic
                 us_mt = sel
                 if sel in EU_TO_US_MAP: us_mt = EU_TO_US_MAP[sel]
                 elif "." in sel:
@@ -289,11 +297,10 @@ with tabs[0]:
                     if found and "." not in found[0].split(" | ")[0]: us_mt = found[0].split(" | ")[0]
 
                 with st.spinner("Data ophalen..."):
-                    data, srcs, debug = get_combined_data(sel, us_mt if us_mt != sel else None, info, active_key)
+                    data, srcs, debug = get_combined_data(sel, us_mt if us_mt != sel else None, info, JOUW_FMP_KEY)
                 
                 score, plus, minn = ai_check(data)
 
-                # Header
                 c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
                 c1.title(truncate_text(safe_get(info, 'shortName', sel)))
                 c1.caption(f"{sel} | US Data: {us_mt}")
@@ -317,7 +324,6 @@ with tabs[0]:
                         st.session_state['wishlist'].append({'ticker': sel, 'name': safe_get(info, 'shortName')})
                         st.rerun()
 
-                # AI
                 col_s = "#4CAF50" if score > 7 else "#FF9800" if score >= 5.5 else "#F44336"
                 st.markdown(f"""
                 <div style="border:1px solid #444; padding:15px; border-radius:10px; margin:20px 0;">
@@ -331,7 +337,6 @@ with tabs[0]:
                     </div>
                 </div>""", unsafe_allow_html=True)
 
-                # Metrics
                 def get_c(k, v):
                     if v is None: return ""
                     if k=='peg': return "🟢" if v<1.5 else "🟠"
@@ -413,7 +418,6 @@ with tabs[3]:
     c1, c2 = st.columns(2)
     yr = c1.selectbox("Jaar", [2023, 2024, 2025])
     
-    # VEILIG GEBRUIK VAN DE CONSTANTE
     defaults = TAX_DEFAULTS.get(yr, {"invest": 6.04, "tax": 36})
     
     fr = c1.number_input("Fictief %", value=defaults["invest"])

@@ -19,7 +19,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Mapping van Europese tickers naar US tickers (voor data dekking bij Finviz)
+# Mapping van Europese tickers naar US tickers
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -29,7 +29,7 @@ EU_TO_US_MAP = {
     "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD"
 }
 
-# Tooltip teksten voor uitleg bij metrics
+# Tooltip teksten
 TOOLTIPS = {
     "peg": "Price/Earnings to Growth (PEG).\n🟢 < 1.5: Ondergewaardeerd.\n🔴 > 2.5: Overgewaardeerd.",
     "pe": "Koers/Winst verhouding (P/E).\n🟢 < 20: Koopje.\n🟠 > 30: Premie.",
@@ -38,12 +38,12 @@ TOOLTIPS = {
     "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
     "div": "Dividend Rendement.\n🟢 > 3%: Interessant.",
     "margin": "Nettowinstmarge.\n🟢 > 20%: Hoge winstmarge.",
-    "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend.\n🔴 < 0: Verlieslatend.",
+    "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend.",
     "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk."
 }
 
 # ==================================================
-# 2. STATE MANAGEMENT & DATA OPSLAG
+# 2. STATE MANAGEMENT
 # ==================================================
 if 'portfolio' not in st.session_state: 
     st.session_state['portfolio'] = []
@@ -52,14 +52,11 @@ if 'wishlist' not in st.session_state:
     st.session_state['wishlist'] = []
 
 # ==================================================
-# 3. HELPER FUNCTIES (SCRAPERS & CALCULATIES)
+# 3. HELPER FUNCTIES
 # ==================================================
 
 @st.cache_data(ttl=600)
 def get_finviz_data(ticker):
-    """
-    Scrapet Finviz.com voor extra targets en metrics.
-    """
     d = {}
     try:
         url = f"https://finviz.com/quote.ashx?t={ticker}"
@@ -143,111 +140,112 @@ def get_youtube_video_id(query):
         return None
 
 # ==================================================
-# 4. DATA ENGINE CLASS (INTEGRATIE YAHOO & FINVIZ)
+# 4. DATA ENGINE CLASS
 # ==================================================
 
 class DataEngine:
     def __init__(self, ticker, original_ticker):
-        self.ticker = ticker  # Ticker voor Finviz (vaak US)
-        self.original_ticker = original_ticker # Ticker voor Yahoo (origineel)
+        self.ticker = ticker 
+        self.original_ticker = original_ticker 
         self.yf_obj = yf.Ticker(original_ticker)
         self.yf_info = self.yf_obj.info
         self.finviz_data = {}
-        
         self.fetch_finviz()
 
     def fetch_finviz(self):
         if "." not in self.ticker:
             self.finviz_data = get_finviz_data(self.ticker)
 
-    def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity):
-        """Helper om een enkele waarde te normaliseren voordat we middelen."""
+    def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity, source_name):
+        """Helper om een enkele waarde te normaliseren."""
         if val is None: return None
         
-        # Debt/Equity Correctie
+        # Debt/Equity Correctie (Yahoo 150 -> 1.5)
         if is_debt_equity:
-            if val > 5.0: 
-                return val / 100.0
+            if val > 5.0: return val / 100.0
             return val
 
         # Percentage Correctie
         if is_percent:
             if is_dividend:
-                # Dividend: < 0.6 betekent waarschijnlijk factor (0.05 -> 5)
+                # Yahoo DividendYield is ALTIJD een ratio (0.005 = 0.5%), dus altijd * 100
+                if source_name == "Yahoo":
+                    return val * 100
+                # Fallback voor andere bronnen (zoals Finviz)
                 if val < 0.6: return val * 100
             else:
-                # Andere percentages: < 1.0 betekent factor (0.15 -> 15)
+                # Andere percentages (ROE, Margin): < 1.0 is factor, > 1.0 is al procent
                 if abs(val) <= 1.0 and val != 0: return val * 100
         
         return val
 
     def get_robust_peg(self):
-        """
-        Haalt PEG op uit Yahoo en Finviz.
-        """
+        """Haalt PEG op (gemiddelde van Yahoo en Finviz)."""
         values = []
         sources = []
 
-        # 1. Yahoo
         val_yf = self.yf_info.get('pegRatio')
         if val_yf:
             values.append(float(val_yf))
             sources.append("Yahoo")
         
-        # 2. Finviz
         val_fin = self.finviz_data.get('peg')
         if val_fin:
             values.append(float(val_fin))
             sources.append("Finviz")
             
-        if not values:
-            return None, "N/A"
+        if not values: return None, "N/A"
         
         avg_val = sum(values) / len(values)
         source_str = " & ".join(sources)
         return avg_val, source_str
 
-    def get_combined_metric(self, key_yf, key_finviz=None, is_percent=False, is_dividend=False, is_debt_equity=False):
+    def get_combined_metric(self, key_yf, key_finviz=None, is_percent=False, is_dividend=False, is_debt_equity=False, use_average=True):
         """
-        Verzamelt data van Yahoo en Finviz, normaliseert ze, en berekent het gemiddelde.
+        Verzamelt data. 
+        Als use_average=True: Middelt Yahoo en Finviz.
+        Als use_average=False: Prioriteit aan Yahoo, Finviz alleen als backup.
         """
         valid_values = []
         sources = []
         
-        # 1. Yahoo Value ophalen & Normaliseren
+        # 1. Yahoo Value ophalen
         raw_yf = self.yf_info.get(key_yf)
         if raw_yf is not None:
-            norm_yf = self._normalize_value(float(raw_yf), is_percent, is_dividend, is_debt_equity)
+            norm_yf = self._normalize_value(float(raw_yf), is_percent, is_dividend, is_debt_equity, "Yahoo")
             valid_values.append(norm_yf)
             sources.append("Yahoo")
         
-        # 2. Finviz Value ophalen & Normaliseren
+        # Als we NIET middelen en we hebben Yahoo, stop dan hier
+        if not use_average and valid_values:
+            return valid_values[0], sources[0]
+
+        # 2. Finviz Value ophalen
         if key_finviz:
             raw_fin = self.finviz_data.get(key_finviz)
             if raw_fin is not None:
-                norm_fin = self._normalize_value(float(raw_fin), is_percent, is_dividend, is_debt_equity)
+                norm_fin = self._normalize_value(float(raw_fin), is_percent, is_dividend, is_debt_equity, "Finviz")
                 valid_values.append(norm_fin)
                 sources.append("Finviz")
 
-        # Resultaat bepalen (Gemiddelde)
         if not valid_values:
             return None, "N/A"
         
+        # Als we niet middelen (en Yahoo was leeg), pakken we Finviz (de eerste in de lijst nu)
+        if not use_average:
+            return valid_values[0], sources[0]
+        
+        # Wel middelen
         avg_val = sum(valid_values) / len(valid_values)
         source_str = " & ".join(sources) + (f" (Avg)" if len(sources) > 1 else "")
         
         return avg_val, source_str
 
 # ==================================================
-# 5. AI SCORE LOGICA (HERZIEN & GEWOGEN)
+# 5. AI SCORE LOGICA
 # ==================================================
 def calculate_ai_score(data):
-    """
-    Berekent een score (0-10) op basis van een gewogen systeem.
-    Startpunt is 5.0 (Neutraal).
-    Er wordt strafpunten uitgedeeld voor verlieslatendheid en schulden.
-    """
-    score = 5.0 # Start neutraal
+    score = 5.0
     reasons = []
     
     # 1. Winstgevendheid (Cruciaal)
@@ -257,10 +255,10 @@ def calculate_ai_score(data):
             score += 1.0
             reasons.append("Winstgevend")
         else:
-            score -= 2.5 # Flinke straf voor verlieslatend
+            score -= 2.5 
             reasons.append("Verlieslatend (EPS < 0)")
     
-    # 2. Waardering (PEG & PE)
+    # 2. Waardering
     peg_val, _ = data['peg']
     if peg_val is not None:
         if 0 < peg_val < 1.5:
@@ -269,7 +267,7 @@ def calculate_ai_score(data):
         elif peg_val > 2.5:
             score -= 0.5
         elif peg_val < 0:
-            score -= 1.0 # Negatieve PEG is vaak slecht teken (negatieve groei of earnings)
+            score -= 1.0
 
     pe_val, _ = data['pe']
     if pe_val is not None:
@@ -278,7 +276,7 @@ def calculate_ai_score(data):
         elif pe_val > 40:
             score -= 0.5
 
-    # 3. Financiële Gezondheid (Balans)
+    # 3. Financiële Gezondheid
     de_val, _ = data['de']
     if de_val is not None:
         if de_val < 1.0:
@@ -294,12 +292,12 @@ def calculate_ai_score(data):
             score += 0.5
         elif cr_val < 1.0:
             score -= 0.5
-            reasons.append("Krap bij kas (Current < 1)")
+            reasons.append("Krap bij kas")
 
-    # 4. Performance & Marges
+    # 4. Performance
     margin_val, _ = data['margin']
     if margin_val is not None:
-        if margin_val > 20: # Aangepast naar 20%
+        if margin_val > 20: 
             score += 1.0
             reasons.append("Hoge Marges")
         elif margin_val < 5:
@@ -310,16 +308,14 @@ def calculate_ai_score(data):
         if roe_val > 15:
             score += 0.5
     
-    # 5. Dividend Bonus
+    # 5. Dividend
     div_val, _ = data['div']
     if div_val is not None and div_val > 2.5:
         score += 0.5
         reasons.append("Mooi Dividend")
 
-    # Begrenzen tussen 0 en 10
     final_score = max(0.0, min(10.0, score))
     
-    # Samenvatting genereren
     summary = "Het bedrijf scoort gemiddeld."
     if final_score >= 7.5:
         summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:3]).lower()}."
@@ -335,11 +331,10 @@ def calculate_ai_score(data):
     return round(final_score, 1), summary
 
 # ==================================================
-# 6. UI: SIDEBAR (BACKUP)
+# 6. UI: SIDEBAR
 # ==================================================
 st.sidebar.header("📂 Data & Backup")
 
-# Download JSON
 json_export = json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']})
 st.sidebar.download_button(
     label="⬇️ Download Backup",
@@ -348,14 +343,13 @@ st.sidebar.download_button(
     mime="application/json"
 )
 
-# Upload JSON
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
 if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
     try:
         loaded_data = json.load(uploaded_file)
         if 'p' in loaded_data: st.session_state['portfolio'] = loaded_data['p']
         if 'w' in loaded_data: st.session_state['wishlist'] = loaded_data['w']
-        st.toast("Data succesvol geladen! Voeg nu gerust nieuwe aandelen toe.", icon="✅")
+        st.toast("Data succesvol geladen!", icon="✅")
     except Exception as e:
         st.error(f"Fout bij laden bestand: {e}")
 
@@ -399,14 +393,18 @@ with tabs[0]:
             
             metrics = {}
             metrics['peg'] = engine.get_robust_peg()
-            metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe')
+            
+            # AANGEPAST: use_average=False voor P/E en Dividend. Prioriteit Yahoo.
+            metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe', use_average=False)
+            metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True, use_average=False)
+            
+            # Overige mogen wel gemiddeld worden
             metrics['roe'] = engine.get_combined_metric('returnOnEquity', 'roe', is_percent=True)
             metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
             metrics['cr'] = engine.get_combined_metric('currentRatio', None)
             metrics['pb'] = engine.get_combined_metric('priceToBook', None)
             metrics['margin'] = engine.get_combined_metric('profitMargins', 'margin', is_percent=True)
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
-            metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True)
             
             raw_currency = info.get('currency', 'EUR').upper()
             if raw_currency == 'USD':
@@ -457,7 +455,7 @@ with tabs[0]:
                     st.subheader("AI Oordeel")
                     st.write(summary)
 
-            st.subheader("📊 Fundamentals (Gemiddelde van Bronnen)")
+            st.subheader("📊 Fundamentals")
             
             def display_metric(label, key, good_fn, bad_fn, fmt="{:.2f}", is_pct=False):
                 val, src = metrics[key]
@@ -467,7 +465,7 @@ with tabs[0]:
                 
                 delta_symbol = "✅" if good_fn(val) else "⚠️" if bad_fn(val) else "⚪"
                 val_display = f"{val:.2f}%" if is_pct else fmt.format(val)
-                tooltip_text = f"Waarde: {val:.2f}\nBronnen: {src}\n\n{TOOLTIPS.get(key, '')}"
+                tooltip_text = f"Waarde: {val:.2f}\nBron: {src}\n\n{TOOLTIPS.get(key, '')}"
                 
                 st.metric(label, val_display, delta=delta_symbol, delta_color="off", help=tooltip_text)
 
@@ -480,7 +478,6 @@ with tabs[0]:
                 
                 c5, c6, c7, c8 = st.columns(4)
                 with c5: display_metric("ROE", 'roe', lambda x: x>15, lambda x: x<5, is_pct=True)
-                # Hier de aangepaste Marge check: x > 20
                 with c6: display_metric("Marge", 'margin', lambda x: x>20, lambda x: x<2, is_pct=True)
                 with c7: display_metric("Debt/Eq", 'de', lambda x: x<1, lambda x: x>2)
                 with c8: display_metric("Current", 'cr', lambda x: x>1.5, lambda x: x<1)

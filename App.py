@@ -17,7 +17,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Mapping: EU Ticker -> US Ticker
+# Mapping: EU Ticker -> US Ticker (voor metrics)
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -41,6 +41,8 @@ TOOLTIPS = {
 # --- STATE MANAGEMENT ---
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
+# Deze state zorgt ervoor dat een geüpload bestand niet bij elke klik opnieuw wordt geladen (wat het portfolio zou resetten)
+if 'loaded_file_id' not in st.session_state: st.session_state['loaded_file_id'] = None
 
 # --- HELPERS ---
 
@@ -64,13 +66,19 @@ def get_finviz_data(ticker):
 
 @st.cache_data(ttl=300)
 def get_currency_rate(from_curr, to_curr="EUR"):
+    """Haalt wisselkoers op."""
     if from_curr == to_curr or not from_curr: return 1.0
     try:
+        # Correctie voor specifieke tickers indien nodig
+        if from_curr == "GBp": # Pence to Pounds
+            base_rate = get_currency_rate("GBP", to_curr)
+            return base_rate / 100
+
         ticker = "EUR=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
-            if from_curr == "USD" and rate > 1.05: return 1/rate
+            if from_curr == "USD" and rate > 1.05: return 1/rate # Soms geeft Yahoo EURUSD ipv USDEUR
             return rate
         return 1.0
     except: return 1.0
@@ -209,18 +217,27 @@ def calculate_ai_score(data):
 # --- UI START ---
 st.sidebar.header("📂 Data")
 st.sidebar.download_button("⬇️ Download JSON", json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']}), "data.json")
+
+# Bestand uploaden (FIX: laad alleen als het bestand verandert, anders reset hij bij elke interactie)
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload JSON", type=['json'])
 if uploaded_file:
-    d = json.load(uploaded_file)
-    st.session_state['portfolio'] = d.get('p', [])
-    st.session_state['wishlist'] = d.get('w', [])
-    st.toast("Geladen!")
+    # We gebruiken de bestandsnaam als unieke ID. Als die anders is dan vorige keer, laden we in.
+    if st.session_state['loaded_file_id'] != uploaded_file.name:
+        d = json.load(uploaded_file)
+        st.session_state['portfolio'] = d.get('p', [])
+        st.session_state['wishlist'] = d.get('w', [])
+        st.session_state['loaded_file_id'] = uploaded_file.name
+        st.toast(f"Portfolio '{uploaded_file.name}' succesvol geladen!")
+    else:
+        # Als het bestand er al stond, doen we niks, zodat we handmatige toevoegingen niet overschrijven.
+        pass
+
 if st.sidebar.button("🧹 Reset Cache"): st.cache_data.clear(); st.rerun()
 
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist", "🇳🇱 Belasting"])
 
 # ==================================================
-# 1. ANALYSE
+# 1. ANALYSE (MET VERBETERDE TOEVOEG FUNCTIE)
 # ==================================================
 with tabs[0]:
     c_search, c_per = st.columns([3, 1])
@@ -255,9 +272,10 @@ with tabs[0]:
             d['div'] = engine.get_combined_metric('dividendYield', 'dividendYielTTM', None, None, True)
             
             curr_sym = info.get('currencySymbol', info.get('currency', ''))
-            cur_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
+            curr_code = info.get('currency', 'EUR')
+            cur_price = info.get('currentPrice') or info.get('regularMarketPreviousClose') or 0.0
             
-            # Data voor portfolio opslag (Sector & Dividend)
+            # Data voor portfolio opslag
             p_sector = info.get('sector', 'Onbekend')
             p_div_yield = d['div'][0] if d['div'][0] else 0.0
             
@@ -273,9 +291,9 @@ with tabs[0]:
                 h1, h2, h3 = st.columns([2, 1, 1])
                 with h1:
                     st.title(info.get('shortName', sel))
-                    st.caption(f"Ticker: {sel} | Valuta: {info.get('currency', '?')} | Sector: {p_sector}")
+                    st.caption(f"Ticker: {sel} | Valuta: {curr_code} | Sector: {p_sector}")
                 with h2:
-                    st.metric("Huidige Koers", f"{curr_sym} {cur_price:.2f}" if cur_price else "-")
+                    st.metric("Huidige Koers", f"{curr_sym} {cur_price:.2f}")
                 with h3:
                     if tgt_val and cur_price:
                         delta = (tgt_val - cur_price) / cur_price
@@ -359,19 +377,38 @@ with tabs[0]:
                 with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                     with st.form("add_pf"):
                         st.markdown(f"**{sel} toevoegen**")
-                        amount = st.number_input("Aantal stuks", min_value=1.0, value=10.0, step=1.0)
-                        price_in = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(cur_price) if cur_price else 0.0)
-                        if st.form_submit_button("Opslaan"):
+                        
+                        amount = st.number_input("Aantal stuks", min_value=0.01, value=10.0, step=1.0)
+                        
+                        # --- HIER ZIT DE WISSELKOERS LOGICA ---
+                        input_method = st.radio("Hoe wil je de prijs invoeren?", ["Prijs per aandeel (Origineel)", "Totaalbedrag in Euro's"])
+                        
+                        rate_curr_to_eur = get_currency_rate(curr_code, "EUR") # Bijv. USD -> EUR (0.95)
+                        
+                        price_to_save = 0.0
+                        
+                        if input_method == "Totaalbedrag in Euro's":
+                            total_eur_input = st.number_input(f"Totaal betaald (€)", value=1000.0)
+                            st.caption(f"Huidige koers: 1 {curr_code} ≈ € {rate_curr_to_eur:.4f}")
+                            if rate_curr_to_eur > 0 and amount > 0:
+                                # Terugrekenen: Euro Totaal -> Euro per aandeel -> Origineel per aandeel
+                                price_per_share_eur = total_eur_input / amount
+                                price_to_save = price_per_share_eur / rate_curr_to_eur
+                                st.write(f"➡️ Berekende prijs: {curr_sym} {price_to_save:.2f} per aandeel")
+                        else:
+                            price_to_save = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(cur_price))
+
+                        if st.form_submit_button("Opslaan in Portfolio"):
                             st.session_state['portfolio'].append({
                                 'ticker': sel, 
                                 'amount': amount, 
-                                'avg_price': price_in,
-                                'currency': info.get('currency', 'EUR'),
+                                'avg_price': price_to_save, # We slaan altijd op in native valuta voor consistente winst berekening
+                                'currency': curr_code,
                                 'symbol': curr_sym,
                                 'sector': p_sector,
                                 'div_yield': p_div_yield
                             })
-                            st.success("Toegevoegd!")
+                            st.success(f"{sel} toegevoegd! ({amount} stuks @ {curr_sym} {price_to_save:.2f})")
                             st.rerun()
             with ac2:
                 if st.button("❤️ Zet op Wishlist", use_container_width=True):
@@ -379,22 +416,12 @@ with tabs[0]:
                     st.toast("Toegevoegd aan Wishlist!")
 
         except Exception as e:
-            st.error(f"Fout: {e}")
+            st.error(f"Fout bij ophalen data: {e}")
 
 # ==================================================
 # 2. PORTFOLIO
 # ==================================================
 with tabs[1]:
-    # --- HELPER: VALUTA CALCULATOR ---
-    with st.expander("💱 Valuta Calculator (USD naar EUR)", expanded=False):
-        c_usd, c_res = st.columns([1, 1])
-        with c_usd:
-            usd_in = st.number_input("Bedrag in USD", value=100.0, step=10.0)
-        with c_res:
-            rate_usd = get_currency_rate("USD", "EUR")
-            eur_out = usd_in * rate_usd
-            st.metric("Waarde in EUR", f"€ {eur_out:.2f}", help=f"Koers: {rate_usd:.4f}")
-
     if st.session_state['portfolio']:
         p_data = []
         tot_val_eur = 0
@@ -417,7 +444,7 @@ with tabs[1]:
             val_raw = live_price * item['amount']
             cost_raw = item['avg_price'] * item['amount']
             
-            # Winst/Verlies per regel
+            # Winst/Verlies per regel (in originele valuta)
             gain_loss = val_raw - cost_raw
             gain_loss_pct = (gain_loss / cost_raw) * 100 if cost_raw != 0 else 0
             
@@ -483,7 +510,6 @@ with tabs[1]:
                 interest = st.slider("Verwacht rendement (%)", 1, 15, 7)
                 
                 final_val = start_cap * (1 + interest/100)**years
-                future_val_series = []
                 current = start_cap
                 for y in range(years):
                     current = current * (1 + interest/100) + (monthly_add * 12)
@@ -568,10 +594,7 @@ with tabs[3]:
             # Rendementspercentage op totaal vermogen
             avg_return_perc = (total_fict_return / total_assets * 100) if total_assets > 0 else 0
             
-            # Belasting berekenen: Grondslag * Gemiddeld Rendement % * Belastingtarief
-            # Formule belastingdienst: (Grondslag * aandeel in rendement) -> simpeler is:
-            # Effectief rendement op grondslag = (Totaal Fictief Rendement / Totaal Vermogen) * Grondslag
-            
+            # Belasting berekenen
             taxable_return = (avg_return_perc / 100) * taxable_base
             tax_to_pay = taxable_return * (tax_rate / 100)
             
@@ -593,8 +616,3 @@ with tabs[3]:
         with c_res2:
             real_tax_burden = (tax_to_pay / real_profit * 100) if real_profit > 0 else 0
             st.metric("Werkelijke Belastingdruk", f"{real_tax_burden:.1f}%", help="Hoeveel % van je echte winst naar de belasting gaat.")
-        
-        if real_profit < tax_to_pay:
-            st.error(f"Oei! Je betaalt meer belasting (€ {tax_to_pay:.0f}) dan je daadwerkelijk hebt verdiend (€ {real_profit:.0f}).")
-        elif real_profit > total_fict_return:
-            st.success(f"Goed bezig! Je hebt het fictieve rendement (€ {total_fict_return:.0f}) verslagen.")

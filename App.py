@@ -294,8 +294,6 @@ st.sidebar.download_button(
 
 # Upload JSON
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
-# We gebruiken een extra knop om de upload te bevestigen, anders overschrijft
-# de upload-widget de state bij elke refresh (dus ook als je een aandeel toevoegt).
 if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
     try:
         loaded_data = json.load(uploaded_file)
@@ -345,18 +343,16 @@ with tabs[0]:
             engine = DataEngine(us_equivalent, selected_ticker)
             info = engine.yf_info
             
-            # Metrics verzamelen via Yahoo (en fallback Finviz)
+            # Metrics verzamelen
             metrics = {}
             metrics['peg'] = engine.get_combined_metric('pegRatio', 'peg')
             metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe')
             metrics['roe'] = engine.get_combined_metric('returnOnEquity', None, is_percent=True)
-            # Debt/Equity met specifieke correctie vlag
             metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
             metrics['cr'] = engine.get_combined_metric('currentRatio', None)
             metrics['pb'] = engine.get_combined_metric('priceToBook', None)
             metrics['margin'] = engine.get_combined_metric('profitMargins', None, is_percent=True)
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
-            # Dividend met specifieke correctie vlag
             metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True)
             
             # Prijzen & Valuta
@@ -463,19 +459,30 @@ with tabs[0]:
             col_add, col_wish = st.columns(2)
             
             with col_add:
-                # Popover zonder calculator, gewoon simpel
                 with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                     st.subheader("Positie Toevoegen")
+                    
+                    # Valuta Check & Converter voor input
+                    rate = 1.0
+                    if curr_code != "EUR":
+                        rate = get_currency_rate(curr_code, "EUR")
+                        st.info(f"💱 Wisselkoers: 1 {curr_code} = € {rate:.4f}")
+                    
                     with st.form("add_position_form"):
                         amount_input = st.number_input("Aantal stuks", min_value=0.0001, value=10.0, step=1.0)
-                        # Prijs wordt standaard ingevuld met huidige koers
-                        price_input = st.number_input(f"Aankoopprijs per stuk ({curr_code})", value=float(current_price) if current_price else 0.0)
+                        # Input prijs is in originele valuta (zoals de gebruiker het ziet in de app/broker)
+                        price_input = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(current_price) if current_price else 0.0)
                         
+                        # Live berekening weergave (indien niet EUR)
+                        if curr_code != "EUR":
+                            eur_total = price_input * amount_input * rate
+                            st.caption(f"💶 Totale aankoopwaarde: € {eur_total:,.2f}")
+
                         if st.form_submit_button("Opslaan in Portfolio"):
                             st.session_state['portfolio'].append({
                                 'ticker': selected_ticker,
                                 'amount': amount_input,
-                                'avg_price': price_input,
+                                'avg_price': price_input, # We slaan op in originele valuta
                                 'currency': curr_code,
                                 'symbol': curr_sym
                             })
@@ -534,18 +541,21 @@ with tabs[1]:
                 sector = "Onbekend"
                 div_amt = 0
             
-            # Berekeningen in originele valuta
+            # Berekeningen: Eerst alles in Native valuta
             val_native = live_price * item['amount']
+            # Cost in native (GAK * Aantal)
             cost_native = item['avg_price'] * item['amount']
+            
+            # Winst in native
             profit_native = val_native - cost_native
             div_total_native = div_amt * item['amount']
             
-            # Omrekenen naar Euro voor totalen
+            # Omrekenen naar Euro voor totalen & display
             eur_rate = get_currency_rate(currency, "EUR")
             
             val_eur = val_native * eur_rate
-            cost_eur = cost_native * eur_rate
-            profit_eur = profit_native * eur_rate
+            cost_eur = cost_native * eur_rate # We gebruiken huidige koers voor benadering historische kosten in EUR (simplistisch, maar effectief voor huidig overzicht)
+            profit_eur = val_eur - cost_eur # Winst in euro's (incl valuta resultaat)
             div_eur = div_total_native * eur_rate
             
             # Totalen bijwerken
@@ -557,15 +567,16 @@ with tabs[1]:
             sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
 
             # Rij toevoegen voor de Editor DataFrame
-            # We gebruiken verborgen kolommen (begint met _) om meta-data op te slaan die we nodig hebben bij opslaan
+            # BELANGRIJK: Prijs & GAK blijven in originele valuta voor herkenbaarheid
+            # Waarde & Winst gaan naar Euro voor uniformiteit in portfolio
             portfolio_data.append({
                 "Ticker": ticker,
                 "Aantal": float(item['amount']),          # Bewerkbaar
-                "GAK": float(item['avg_price']),          # Bewerkbaar
-                "Huidige Prijs": live_price,              # Read-only
-                "Waarde": val_native,                     # Read-only
-                "Winst/Verlies": profit_eur,              # Read-only (in EUR voor overzicht)
-                "Div/Jaar": div_eur,                      # Read-only (in EUR)
+                "GAK": float(item['avg_price']),          # Bewerkbaar (Originele Valuta)
+                "Huidige Prijs": live_price,              # Read-only (Originele Valuta)
+                "Waarde (€)": val_eur,                    # Read-only (Euro)
+                "Winst (€)": profit_eur,                  # Read-only (Euro)
+                "Div/Jaar (€)": div_eur,                  # Read-only (Euro)
                 "Sector": sector,
                 "Valuta": symbol,
                 "_currency_code": currency                # Verborgen
@@ -599,7 +610,8 @@ with tabs[1]:
             st.subheader("Dividend Verwachting")
             if portfolio_data:
                 df_charts = pd.DataFrame(portfolio_data)
-                fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar', color='Sector', title="Dividend per Positie (€)")
+                # Voor de grafiek gebruiken we de euro dividend kolom
+                fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', title="Dividend per Positie (€)")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
         # 4. TABEL MET BEWERK FUNCTIE (st.data_editor)
@@ -611,11 +623,11 @@ with tabs[1]:
         column_settings = {
             "Ticker": st.column_config.TextColumn("Aandeel", disabled=True),
             "Aantal": st.column_config.NumberColumn("Aantal", min_value=0.0001, required=True, step=1.0),
-            "GAK": st.column_config.NumberColumn("GAK (Origineel)", min_value=0.0, required=True, format="%.2f"),
-            "Huidige Prijs": st.column_config.NumberColumn("Prijs", format="%.2f", disabled=True),
-            "Waarde": st.column_config.NumberColumn("Waarde (Origineel)", format="%.2f", disabled=True),
-            "Winst/Verlies": st.column_config.NumberColumn("Winst (EUR)", format="€ %.2f", disabled=True), # Kleurt niet automatisch, maar crasht ook niet
-            "Div/Jaar": st.column_config.NumberColumn("Div/Jaar (EUR)", format="€ %.2f", disabled=True),
+            "GAK": st.column_config.NumberColumn("GAK (Origineel)", min_value=0.0, required=True, format="%.2f", help="Gemiddelde Aankoopkoers in originele valuta"),
+            "Huidige Prijs": st.column_config.NumberColumn("Prijs (Origineel)", format="%.2f", disabled=True, help="Huidige koers in originele valuta"),
+            "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
+            "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
+            "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
             "Sector": st.column_config.TextColumn(disabled=True),
             "Valuta": st.column_config.TextColumn(disabled=True)
         }
@@ -624,18 +636,13 @@ with tabs[1]:
         edited_df = st.data_editor(
             df_editor_source,
             column_config=column_settings,
-            column_order=("Ticker", "Aantal", "GAK", "Huidige Prijs", "Waarde", "Winst/Verlies", "Div/Jaar", "Sector", "Valuta"),
+            column_order=("Ticker", "Aantal", "GAK", "Huidige Prijs", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Sector", "Valuta"),
             hide_index=True,
             use_container_width=True,
             key="main_portfolio_editor"
         )
 
         # 5. OPSLAAN VAN WIJZIGINGEN
-        # We checken of de data in de editor verschilt van de bron data
-        # Omdat float vergelijkingen lastig zijn, checken we of de gebruiker iets heeft aangepast
-        # Door simpelweg de session state te overschrijven met de edited_df waarden.
-        
-        # We bouwen de nieuwe state op basis van wat er nu in edited_df staat
         new_state_portfolio = []
         data_changed = False
         

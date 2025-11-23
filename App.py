@@ -17,7 +17,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Mapping: EU Ticker -> US Ticker (voor metrics)
+# Mapping: EU Ticker -> US Ticker
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -224,15 +224,13 @@ if uploaded_file:
         st.session_state['wishlist'] = d.get('w', [])
         st.session_state['loaded_file_id'] = uploaded_file.name
         st.toast(f"Portfolio '{uploaded_file.name}' succesvol geladen!")
-    else:
-        pass
 
 if st.sidebar.button("🧹 Reset Cache"): st.cache_data.clear(); st.rerun()
 
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist", "🇳🇱 Belasting"])
 
 # ==================================================
-# 1. ANALYSE (MET VERBETERDE TOEVOEG FUNCTIE)
+# 1. ANALYSE (SIMPELE VERSIE)
 # ==================================================
 with tabs[0]:
     c_search, c_per = st.columns([3, 1])
@@ -373,22 +371,7 @@ with tabs[0]:
                         st.markdown(f"**{sel} toevoegen**")
                         
                         amount = st.number_input("Aantal stuks", min_value=0.01, value=10.0, step=1.0)
-                        
-                        # --- HIER ZIT DE NIEUWE WISSELKOERS LOGICA ---
-                        use_eur = st.checkbox(f"Prijs invoeren in Euro's (€)?")
-                        
-                        rate_curr_to_eur = get_currency_rate(curr_code, "EUR")
-                        price_to_save = 0.0
-                        
-                        if use_eur:
-                            # Invoer in Euro's per aandeel
-                            price_eur_input = st.number_input("Aankoopprijs per aandeel (€)", value=float(cur_price * rate_curr_to_eur))
-                            if rate_curr_to_eur > 0:
-                                price_to_save = price_eur_input / rate_curr_to_eur
-                                st.caption(f"Omgerekend naar originele valuta: {curr_sym} {price_to_save:.2f}")
-                        else:
-                            # Invoer in originele valuta
-                            price_to_save = st.number_input(f"Aankoopprijs per aandeel ({curr_sym})", value=float(cur_price))
+                        price_to_save = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(cur_price))
 
                         if st.form_submit_button("Opslaan in Portfolio"):
                             st.session_state['portfolio'].append({
@@ -507,7 +490,7 @@ with tabs[1]:
         st.info("Je portfolio is nog leeg. Voeg aandelen toe via de Analyse tab.")
 
 # ==================================================
-# 3. WISHLIST
+# 3. WISHLIST (COMPACTE VERSIE)
 # ==================================================
 with tabs[2]:
     if st.session_state['wishlist']:
@@ -525,44 +508,48 @@ with tabs[2]:
                 color = "green" if pct_change >= 0 else "red"
                 sign = "+" if pct_change >= 0 else ""
                 
-                st.markdown(f"**{ticker}** | {name} : € {price:.2f} (<span style='color:{color}'>{sign}{pct_change:.2f}%</span>)", unsafe_allow_html=True)
-                st.divider()
+                # HTML gebruiken voor een compactere weergave (dichter op elkaar)
+                st.markdown(f"""
+                <div style="padding: 2px 0; border-bottom: 1px solid #333;">
+                    <b>{ticker}</b> | {name} : € {price:.2f} (<span style='color:{color}'>{sign}{pct_change:.2f}%</span>)
+                </div>
+                """, unsafe_allow_html=True)
             except:
                 st.write(f"**{ticker}** | {name} : Data niet beschikbaar")
-                st.divider()
     else: 
         st.info("Je wishlist is leeg.")
 
 # ==================================================
-# 4. BELASTING (BOX 3 CALCULATOR)
+# 4. BELASTING (ZONDER STANDAARD DREMPELS)
 # ==================================================
 with tabs[3]:
     st.header("🧮 Werkelijk Rendement vs. Belastingdruk")
-    st.caption("Bereken hier je belasting in Box 3 op basis van je vermogensverdeling en vergelijk dit met je werkelijke rendement.")
+    st.caption("Bereken hier je belasting in Box 3. Vul zelf de vrijstellingen in.")
 
     with st.container(border=True):
         col_b1, col_b2 = st.columns(2)
         
         with col_b1:
             st.subheader("1. Jouw Vermogen (1 jan)")
-            savings = st.number_input("Spaargeld (€)", value=20000, step=1000)
-            investments = st.number_input("Beleggingen / Overig (€)", value=50000, step=1000)
+            savings = st.number_input("Spaargeld (€)", value=0, step=1000)
+            investments = st.number_input("Beleggingen / Overig (€)", value=0, step=1000)
             debts = st.number_input("Schulden (boven drempel) (€)", value=0, step=1000)
-            fiscal_partner = st.checkbox("Fiscaal Partner?", value=False)
+            
+            # Geen hardcoded drempels meer, gebruiker vult in
+            allowance = st.number_input("Heffingsvrij vermogen (Totaal voor jouw situatie)", value=0, step=1000)
             
             total_assets = savings + investments - debts
-            allowance = 114000 if fiscal_partner else 57000
             taxable_base = max(0, total_assets - allowance)
             
-            st.info(f"Totaal Vermogen: € {total_assets:,.2f}\n\nHeffingsvrij: € {allowance:,.2f}\n\n**Grondslag Box 3: € {taxable_base:,.2f}**")
+            st.info(f"Totaal Vermogen: € {total_assets:,.2f}\n\n**Grondslag Box 3: € {taxable_base:,.2f}**")
 
         with col_b2:
             st.subheader("2. Rendement & Tarieven")
-            st.caption("Vul hier de (fictieve) percentages in die voor dat jaar gelden.")
+            st.caption("Vul de percentages voor het betreffende jaar in.")
             
-            perc_savings = st.number_input("Fictief % Sparen", value=1.03, format="%.2f")
-            perc_invest = st.number_input("Fictief % Beleggen", value=6.04, format="%.2f")
-            perc_debt = st.number_input("Fictief % Schulden", value=2.50, format="%.2f")
+            perc_savings = st.number_input("Fictief % Sparen", value=0.0, format="%.2f")
+            perc_invest = st.number_input("Fictief % Beleggen", value=0.0, format="%.2f")
+            perc_debt = st.number_input("Fictief % Schulden", value=0.0, format="%.2f")
             tax_rate = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=1.0)
             
             fict_savings = savings * (perc_savings / 100)
@@ -582,7 +569,7 @@ with tabs[3]:
     
     with st.container(border=True):
         st.subheader("3. Werkelijkheid vs Fictie")
-        real_profit = st.number_input("Wat was je WERKELIJKE winst in euro's dit jaar?", value=float(int(fict_invest + fict_savings)))
+        real_profit = st.number_input("Wat was je WERKELIJKE winst in euro's dit jaar?", value=0.0)
         
         c_res1, c_res2 = st.columns(2)
         

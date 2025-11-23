@@ -76,7 +76,7 @@ def get_finviz_data(ticker):
             d['eps'] = parse('EPS \(ttm\)')
             d['pe'] = parse('P/E')
             d['de'] = parse('Debt/Eq')
-            d['roe'] = parse('ROE') # Finviz ROE is vaak al in % (bv 15.5)
+            d['roe'] = parse('ROE') 
             d['margin'] = parse('Profit Margin')
     except Exception:
         pass
@@ -99,22 +99,20 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         return 1.0
 
 def search_yahoo_strict(query):
+    """
+    Zoekt aandelen via Yahoo Finance API.
+    Standaard sortering van Yahoo wordt gebruikt.
+    """
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=15"
+        # Let op: region=US gezet voor bredere resultaten, of je kunt dit weglaten voor globaal
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&quotesCount=15"
         r = requests.get(url, headers=HEADERS, timeout=3)
         data = r.json()
         results = []
         raw_quotes = data.get('quotes', [])
         
-        def sort_key(q):
-            s = q.get('symbol', '')
-            if s.endswith('.AS'): return 0
-            if s.endswith('.DE') or s.endswith('.F'): return 1
-            if any(s.endswith(x) for x in ['.PA', '.BR', '.MI', '.MC', '.LS']): return 2
-            if '.' not in s: return 10 
-            return 20 
-
-        raw_quotes.sort(key=sort_key)
+        # GEEN Custom Sortering meer op .AS of .DE
+        
         for q in raw_quotes:
             symbol = q.get('symbol')
             name = q.get('shortname') or q.get('longname') or symbol
@@ -173,7 +171,7 @@ class DataEngine:
         """Helper om een enkele waarde te normaliseren voordat we middelen."""
         if val is None: return None
         
-        # Debt/Equity Correctie (Yahoo geeft vaak 150 voor 1.5)
+        # Debt/Equity Correctie
         if is_debt_equity:
             if val > 5.0: 
                 return val / 100.0
@@ -182,17 +180,16 @@ class DataEngine:
         # Percentage Correctie
         if is_percent:
             if is_dividend:
-                # Dividend: < 0.6 is factor (0.05 -> 5)
                 if val < 0.6: return val * 100
             else:
-                # Andere percentages: < 1.0 is factor (0.15 -> 15)
                 if abs(val) <= 1.0 and val != 0: return val * 100
         
         return val
 
     def get_robust_peg(self):
         """
-        Haalt PEG op uit meerdere bronnen en berekent het gemiddelde.
+        Haalt PEG op uit Yahoo en Finviz.
+        GEEN eigen berekening meer.
         """
         values = []
         sources = []
@@ -208,17 +205,6 @@ class DataEngine:
         if val_fin:
             values.append(float(val_fin))
             sources.append("Finviz")
-            
-        # 3. Zelf Berekenen
-        try:
-            pe = self.yf_info.get('trailingPE')
-            growth = self.yf_info.get('earningsGrowth')
-            if pe and growth and growth > 0:
-                calc_peg = pe / (growth * 100)
-                values.append(calc_peg)
-                sources.append("Calc")
-        except:
-            pass
             
         if not values:
             return None, "N/A"

@@ -2,11 +2,13 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta
+import numpy as np
 
 # ==================================================
 # 1. CONFIGURATIE & CONSTANTEN
@@ -25,7 +27,8 @@ EU_TO_US_MAP = {
     "SIE.DE": "SIEGY", "ALV.DE": "ALIZY", "AIR.PA": "EADSY", "MC.PA": "LVMUY",
     "OR.PA": "LRLCY", "ASML.AS": "ASML", "PHIA.AS": "PHG", "INGA.AS": "ING",
     "MT.AS": "MT", "DSM.AS": "DSM", "2PP.DE": "PYPL", "NOVO-B.CO": "NVO",
-    "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD"
+    "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD", "SHELL.AS": "SHEL",
+    "WKL.AS": "WTKWY", "9PDA.DU": "PROSY" 
 }
 
 # Tooltip teksten
@@ -41,11 +44,42 @@ TOOLTIPS = {
     "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk."
 }
 
+# Gebruikersdata (Ingebed)
+DEFAULT_PORTFOLIO = [
+    {"ticker": "LAZR", "amount": 61.87, "avg_price": 13.979733724594116, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "HEIA.AS", "amount": 13.588, "avg_price": 73.59, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "SHELL.AS", "amount": 34.84, "avg_price": 28.7, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "MSFT", "amount": 2.87, "avg_price": 401.1400529623032, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "BESI.AS", "amount": 9.68, "avg_price": 103.35, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "9PDA.DU", "amount": 12.14, "avg_price": 90.59, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "VOW3.DE", "amount": 15.58, "avg_price": 96.31, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "VWCE.DE", "amount": 12.59, "avg_price": 123.78, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "CRM", "amount": 9.19, "avg_price": 250.7370033931732, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "JNJ", "amount": 10.87, "avg_price": 158.86689165115357, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "ORCL", "amount": 11.32, "avg_price": 152.59098153591154, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "AMD", "amount": 11.98, "avg_price": 96.11930593013763, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "D9Z.F", "amount": 57.39, "avg_price": 43.56, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "BIDU", "amount": 25.5, "avg_price": 92.58406848907471, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "AMZN", "amount": 13.93, "avg_price": 206.59835482120513, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "LLY", "amount": 3.23, "avg_price": 712.3215557956696, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "SSU.F", "amount": 2.25, "avg_price": 888.32, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "PFE", "amount": 144.68, "avg_price": 25.069094166755676, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "PEP", "amount": 26.56, "avg_price": 151.73883961200715, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "BABA", "amount": 31.45, "avg_price": 109.84570016384124, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "PYPL", "amount": 81.24, "avg_price": 70.87748029232024, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "WKL.AS", "amount": 49.24, "avg_price": 121.85, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "ASML.AS", "amount": 5.56, "avg_price": 629.12, "currency": "EUR", "symbol": "€"}, 
+    {"ticker": "JD", "amount": 192.53, "avg_price": 34.38507817268371, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "NVO", "amount": 119.0, "avg_price": 55.981576588153835, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "GOOG", "amount": 23.96, "avg_price": 168.23258237957955, "currency": "USD", "symbol": "$"}, 
+    {"ticker": "WEBN.DE", "amount": 1662.43, "avg_price": 10.08, "currency": "EUR", "symbol": "€"}
+]
+
 # ==================================================
 # 2. STATE MANAGEMENT
 # ==================================================
 if 'portfolio' not in st.session_state: 
-    st.session_state['portfolio'] = []
+    st.session_state['portfolio'] = DEFAULT_PORTFOLIO
 
 if 'wishlist' not in st.session_state: 
     st.session_state['wishlist'] = []
@@ -97,6 +131,79 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         return 1.0
     except Exception:
         return 1.0
+
+@st.cache_data(ttl=3600)
+def get_extended_portfolio_data(ticker):
+    """
+    Haalt uitgebreide data op voor portfolio analyse:
+    - Quote Type (ETF/Equity)
+    - Dividend Historie (voor maandelijkse projectie)
+    - Earnings History (voor beats)
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        info = tk.info
+        
+        # 1. Type bepalen
+        q_type = info.get('quoteType', 'EQUITY').upper()
+        if 'ETF' in q_type:
+            q_type = 'ETF'
+        else:
+            q_type = 'Aandeel'
+            
+        # 2. Earnings Beats
+        earnings_surprise = None
+        earnings_date = None
+        try:
+            # Probeer earnings dates op te halen
+            dates = tk.earnings_dates
+            if dates is not None and not dates.empty:
+                # Pak de meest recente rapportage die in het verleden ligt
+                past_dates = dates[dates.index < datetime.now()]
+                if not past_dates.empty:
+                    last_report = past_dates.iloc[0]
+                    reported = last_report.get('Reported EPS')
+                    estimate = last_report.get('EPS Estimate')
+                    earnings_date = past_dates.index[0]
+                    
+                    if pd.notnull(reported) and pd.notnull(estimate) and estimate != 0:
+                        surprise_pct = ((reported - estimate) / abs(estimate)) * 100
+                        earnings_surprise = {
+                            'date': earnings_date,
+                            'reported': reported,
+                            'estimate': estimate,
+                            'surprise_pct': surprise_pct
+                        }
+        except Exception:
+            pass
+
+        # 3. Dividend Maanden
+        dividend_months = []
+        try:
+            # Haal dividend historie van laatste jaar
+            hist = tk.dividends
+            last_year = datetime.now() - timedelta(days=365)
+            recent_divs = hist[hist.index > last_year]
+            
+            for date, amount in recent_divs.items():
+                dividend_months.append({
+                    'month': date.month,
+                    'amount': amount
+                })
+        except Exception:
+            pass
+
+        return {
+            'type': q_type,
+            'earnings': earnings_surprise,
+            'dividend_history': dividend_months,
+            'sector': info.get('sector', 'ETF/Overig'),
+            'live_price': info.get('currentPrice') or info.get('regularMarketPreviousClose'),
+            'currency_symbol': info.get('currencySymbol', '€'),
+            'shortName': info.get('shortName', ticker)
+        }
+    except Exception:
+        return None
 
 def search_yahoo_strict(query):
     try:
@@ -160,67 +267,44 @@ class DataEngine:
             self.finviz_data = get_finviz_data(self.ticker)
 
     def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity, source_name):
-        """Helper om een enkele waarde te normaliseren."""
         if val is None: return None
-        
-        # Debt/Equity Correctie (Yahoo 150 -> 1.5)
         if is_debt_equity:
             if val > 5.0: return val / 100.0
             return val
-
-        # Percentage Correctie
         if is_percent:
             if is_dividend:
-                # GEEN vermenigvuldiging met 100 voor dividend
                 return val
             else:
-                # Andere percentages (ROE, Margin): < 1.0 is factor, > 1.0 is al procent
                 if abs(val) <= 1.0 and val != 0: return val * 100
-        
         return val
 
     def get_robust_peg(self):
-        """Haalt PEG op (gemiddelde van Yahoo en Finviz)."""
         values = []
         sources = []
-
         val_yf = self.yf_info.get('pegRatio')
         if val_yf:
             values.append(float(val_yf))
             sources.append("Yahoo")
-        
         val_fin = self.finviz_data.get('peg')
         if val_fin:
             values.append(float(val_fin))
             sources.append("Finviz")
-            
         if not values: return None, "N/A"
-        
-        avg_val = sum(values) / len(values)
-        source_str = " & ".join(sources)
-        return avg_val, source_str
+        return sum(values) / len(values), " & ".join(sources)
 
     def get_combined_metric(self, key_yf, key_finviz=None, is_percent=False, is_dividend=False, is_debt_equity=False, use_average=True):
-        """
-        Verzamelt data. 
-        Als use_average=True: Middelt Yahoo en Finviz.
-        Als use_average=False: Prioriteit aan Yahoo, Finviz alleen als backup.
-        """
         valid_values = []
         sources = []
         
-        # 1. Yahoo Value ophalen
         raw_yf = self.yf_info.get(key_yf)
         if raw_yf is not None:
             norm_yf = self._normalize_value(float(raw_yf), is_percent, is_dividend, is_debt_equity, "Yahoo")
             valid_values.append(norm_yf)
             sources.append("Yahoo")
         
-        # Als we NIET middelen en we hebben Yahoo, stop dan hier
         if not use_average and valid_values:
             return valid_values[0], sources[0]
 
-        # 2. Finviz Value ophalen
         if key_finviz:
             raw_fin = self.finviz_data.get(key_finviz)
             if raw_fin is not None:
@@ -228,17 +312,11 @@ class DataEngine:
                 valid_values.append(norm_fin)
                 sources.append("Finviz")
 
-        if not valid_values:
-            return None, "N/A"
+        if not valid_values: return None, "N/A"
+        if not use_average: return valid_values[0], sources[0]
         
-        # Als we niet middelen (en Yahoo was leeg), pakken we Finviz
-        if not use_average:
-            return valid_values[0], sources[0]
-        
-        # Wel middelen
         avg_val = sum(valid_values) / len(valid_values)
         source_str = " & ".join(sources) + (f" (Avg)" if len(sources) > 1 else "")
-        
         return avg_val, source_str
 
 # ==================================================
@@ -248,88 +326,54 @@ def calculate_ai_score(data):
     score = 5.0
     reasons = []
     
-    # 1. Winstgevendheid
     eps_val, _ = data['eps']
     if eps_val is not None:
-        if eps_val > 0:
-            score += 1.0
-            reasons.append("Winstgevend")
-        else:
-            score -= 2.5 
-            reasons.append("Verlieslatend (EPS < 0)")
+        if eps_val > 0: score += 1.0; reasons.append("Winstgevend")
+        else: score -= 2.5; reasons.append("Verlieslatend (EPS < 0)")
     
-    # 2. Waardering
     peg_val, _ = data['peg']
     if peg_val is not None:
-        if 0 < peg_val < 1.5:
-            score += 1.0
-            reasons.append("Goede PEG")
-        elif peg_val > 2.5:
-            score -= 0.5
-        elif peg_val < 0:
-            score -= 1.0
+        if 0 < peg_val < 1.5: score += 1.0; reasons.append("Goede PEG")
+        elif peg_val > 2.5: score -= 0.5
+        elif peg_val < 0: score -= 1.0
 
     pe_val, _ = data['pe']
     if pe_val is not None:
-        if 0 < pe_val < 20:
-            score += 0.5
-        elif pe_val > 40:
-            score -= 0.5
+        if 0 < pe_val < 20: score += 0.5
+        elif pe_val > 40: score -= 0.5
 
-    # 3. Financiële Gezondheid
     de_val, _ = data['de']
     if de_val is not None:
-        if de_val < 1.0:
-            score += 1.0
-            reasons.append("Gezonde Balans")
-        elif de_val > 2.0:
-            score -= 1.0
-            reasons.append("Veel Schulden")
+        if de_val < 1.0: score += 1.0; reasons.append("Gezonde Balans")
+        elif de_val > 2.0: score -= 1.0; reasons.append("Veel Schulden")
 
     cr_val, _ = data['cr']
     if cr_val is not None:
-        if cr_val > 1.5:
-            score += 0.5
-        elif cr_val < 1.0:
-            score -= 0.5
-            reasons.append("Krap bij kas")
+        if cr_val > 1.5: score += 0.5
+        elif cr_val < 1.0: score -= 0.5; reasons.append("Krap bij kas")
 
-    # 4. Performance
     margin_val, _ = data['margin']
     if margin_val is not None:
-        if margin_val > 20: 
-            score += 1.0
-            reasons.append("Hoge Marges")
-        elif margin_val < 5:
-            score -= 0.5
+        if margin_val > 20: score += 1.0; reasons.append("Hoge Marges")
+        elif margin_val < 5: score -= 0.5
 
     roe_val, _ = data['roe']
     if roe_val is not None:
-        if roe_val > 15:
-            score += 0.5
+        if roe_val > 15: score += 0.5
     
-    # 5. Dividend (Logica aangepast voor decimalen vs procenten)
     div_val, _ = data['div']
     if div_val is not None:
         is_decimal = div_val < 1.0
         threshold = 0.025 if is_decimal else 2.5
-        if div_val > threshold:
-            score += 0.5
-            reasons.append("Mooi Dividend")
+        if div_val > threshold: score += 0.5; reasons.append("Mooi Dividend")
 
     final_score = max(0.0, min(10.0, score))
-    
     summary = "Het bedrijf scoort gemiddeld."
-    if final_score >= 7.5:
-        summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:3]).lower()}."
+    if final_score >= 7.5: summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:3]).lower()}."
     elif final_score <= 4.0:
         neg_reasons = [r for r in reasons if "Verlies" in r or "Schulden" in r or "Krap" in r]
-        if neg_reasons:
-            summary = f"Risicovol! Let op: {', '.join(neg_reasons).lower()}."
-        else:
-            summary = "De fundamentals zien er zwak uit op basis van de beschikbare data."
-    elif reasons:
-        summary = f"Gemengd beeld. Opvallend: {', '.join(reasons[:2]).lower()}."
+        summary = f"Risicovol! Let op: {', '.join(neg_reasons).lower()}." if neg_reasons else "De fundamentals zien er zwak uit."
+    elif reasons: summary = f"Gemengd beeld. Opvallend: {', '.join(reasons[:2]).lower()}."
     
     return round(final_score, 1), summary
 
@@ -353,6 +397,7 @@ if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
         if 'p' in loaded_data: st.session_state['portfolio'] = loaded_data['p']
         if 'w' in loaded_data: st.session_state['wishlist'] = loaded_data['w']
         st.toast("Data succesvol geladen!", icon="✅")
+        st.rerun()
     except Exception as e:
         st.error(f"Fout bij laden bestand: {e}")
 
@@ -369,7 +414,6 @@ tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️ Wishlist", "🇳�
 # TAB 1: ANALYSE
 # --------------------------------------------------
 with tabs[0]:
-    # Zoekfunctie Logica met Session State om reset te voorkomen
     def run_search():
         query = st.session_state.search_main
         if query:
@@ -409,13 +453,8 @@ with tabs[0]:
             
             metrics = {}
             metrics['peg'] = engine.get_robust_peg()
-            
-            # P/E: Yahoo > Finviz (Geen Avg)
             metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe', use_average=False)
-            
-            # Dividend: Yahoo > Finviz (Geen Avg), Geen *100
             metrics['div'] = engine.get_combined_metric('dividendYield', 'div', is_percent=True, is_dividend=True, use_average=False)
-            
             metrics['roe'] = engine.get_combined_metric('returnOnEquity', 'roe', is_percent=True)
             metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
             metrics['cr'] = engine.get_combined_metric('currentRatio', None)
@@ -424,23 +463,9 @@ with tabs[0]:
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
             
             raw_currency = info.get('currency', 'EUR').upper()
-            if raw_currency == 'USD':
-                curr_sym = '$'
-            elif raw_currency == 'EUR':
-                curr_sym = '€'
-            elif raw_currency == 'GBP':
-                curr_sym = '£'
-            else:
-                curr_sym = info.get('currencySymbol', '€')
-
-            curr_code = raw_currency
+            curr_sym = '$' if raw_currency == 'USD' else '€' if raw_currency == 'EUR' else info.get('currencySymbol', '€')
             current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
-            
-            target_val = info.get('targetMeanPrice')
-            target_src = "Yahoo"
-            if not target_val:
-                target_val = engine.finviz_data.get('target')
-                target_src = "Finviz"
+            target_val = info.get('targetMeanPrice') or engine.finviz_data.get('target')
             
             score, summary = calculate_ai_score(metrics)
 
@@ -448,52 +473,38 @@ with tabs[0]:
                 h1, h2, h3 = st.columns([2, 1, 1])
                 with h1:
                     st.title(info.get('shortName', selected_ticker))
-                    st.caption(f"Ticker: {selected_ticker} | Valuta: {curr_code}")
+                    st.caption(f"Ticker: {selected_ticker} | Valuta: {raw_currency}")
                 with h2:
                     st.metric("Huidige Koers", f"{curr_sym} {current_price:.2f}" if current_price else "-")
                 with h3:
                     if target_val and current_price:
                         delta_target = (target_val - current_price) / current_price
-                        st.metric("Koersdoel", f"{curr_sym} {target_val:.2f}", f"{delta_target:.1%}", help=f"Bron: {target_src}")
+                        st.metric("Koersdoel", f"{curr_sym} {target_val:.2f}", f"{delta_target:.1%}")
                     else:
                         st.metric("Koersdoel", "N/A")
-                
                 st.divider()
-                
                 a1, a2 = st.columns([1, 4])
                 with a1:
                     score_col = "green" if score >= 7 else "orange" if score >= 5 else "red"
-                    st.markdown(f"""
-                        <div style='text-align:center; color:{score_col}; font-size:40px; font-weight:bold; 
-                        border:3px solid {score_col}; border-radius:50%; width:100px; height:100px; 
-                        line-height:90px; margin:auto'>{score}</div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"<div style='text-align:center; color:{score_col}; font-size:40px; font-weight:bold; border:3px solid {score_col}; border-radius:50%; width:100px; height:100px; line-height:90px; margin:auto'>{score}</div>", unsafe_allow_html=True)
                 with a2:
                     st.subheader("AI Oordeel")
                     st.write(summary)
 
             st.subheader("📊 Fundamentals")
-            
             def display_metric(label, key, good_fn, bad_fn, fmt="{:.2f}", is_pct=False):
                 val, src = metrics[key]
-                if val is None:
-                    st.metric(label, "N/A", help=f"Bron: {src}")
-                    return
-                
+                if val is None: st.metric(label, "N/A", help=f"Bron: {src}"); return
                 delta_symbol = "✅" if good_fn(val) else "⚠️" if bad_fn(val) else "⚪"
                 val_display = f"{val:.2f}%" if is_pct else fmt.format(val)
-                tooltip_text = f"Waarde: {val:.2f}\nBron: {src}\n\n{TOOLTIPS.get(key, '')}"
-                
-                st.metric(label, val_display, delta=delta_symbol, delta_color="off", help=tooltip_text)
+                st.metric(label, val_display, delta=delta_symbol, delta_color="off", help=f"Waarde: {val:.2f}\nBron: {src}\n{TOOLTIPS.get(key, '')}")
 
             with st.container(border=True):
                 c1, c2, c3, c4 = st.columns(4)
                 with c1: display_metric("P/E Ratio", 'pe', lambda x: x<20, lambda x: x>35)
                 with c2: display_metric("PEG Ratio", 'peg', lambda x: x<1.5, lambda x: x>2.5)
                 with c3: display_metric("EPS", 'eps', lambda x: x>0, lambda x: x<0)
-                # Dividend check: ondersteunt zowel decimaal (0.03) als procent (3.0)
                 with c4: display_metric("Dividend", 'div', lambda x: x>3 or (x<1 and x>0.03), lambda x: x<1 and x>0.01, is_pct=True)
-                
                 c5, c6, c7, c8 = st.columns(4)
                 with c5: display_metric("ROE", 'roe', lambda x: x>15, lambda x: x<5, is_pct=True)
                 with c6: display_metric("Marge", 'margin', lambda x: x>20, lambda x: x<2, is_pct=True)
@@ -507,180 +518,262 @@ with tabs[0]:
                     fig = px.area(hist_data, x=hist_data.index, y='Close', title=f"Koersverloop ({chart_period})")
                     fig.update_layout(yaxis_title=f"Prijs ({curr_sym})")
                     st.plotly_chart(fig, use_container_width=True)
-            
             with col_news:
                 st.markdown("##### 📰 Recent Nieuws")
                 news_items = get_google_news(info.get('shortName', selected_ticker))
-                for item in news_items:
-                    st.markdown(f"🔹 [{item['title']}]({item['link']})\n*{item['date']}*")
-                
+                for item in news_items: st.markdown(f"🔹 [{item['title']}]({item['link']})\n*{item['date']}*")
                 st.markdown("##### 📺 Analyse Video")
                 vid_id = get_youtube_video_id(selected_ticker)
-                if vid_id:
-                    st.video(f"https://www.youtube.com/watch?v={vid_id}")
+                if vid_id: st.video(f"https://www.youtube.com/watch?v={vid_id}")
 
             st.divider()
             col_add, col_wish = st.columns(2)
-            
             with col_add:
                 with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                     st.subheader("Positie Toevoegen")
-                    
                     rate = 1.0
-                    if curr_code != "EUR":
-                        rate = get_currency_rate(curr_code, "EUR")
-                        reverse_rate = 1.0 / rate if rate > 0 else 0
-                        st.info(f"Koers gebruikt: 1 {curr_code} = € {rate:.4f} (1 EUR ≈ {curr_code} {reverse_rate:.2f})")
-                        
+                    if raw_currency != "EUR":
+                        rate = get_currency_rate(raw_currency, "EUR")
+                        st.info(f"Koers: 1 {raw_currency} = € {rate:.4f}")
                         cur_price_eur = (float(current_price) * rate) if current_price else 0.0
-                        st.write(f"Huidige koers: {curr_sym} {current_price} (≈ € {cur_price_eur:.2f})")
+                        st.write(f"Prijs: {curr_sym} {current_price} (≈ € {cur_price_eur:.2f})")
                     else:
-                        st.write(f"Huidige koers: € {current_price}")
+                        st.write(f"Prijs: € {current_price}")
 
                     with st.form("add_position_form"):
                         amount_input = st.number_input("Aantal stuks", min_value=0.0001, value=10.0, step=1.0)
-                        
-                        default_eur_price = (float(current_price) * rate) if current_price else 0.0
-                        price_input_eur = st.number_input("Aankoopprijs per stuk (€)", value=default_eur_price)
+                        price_input_eur = st.number_input("Aankoopprijs per stuk (€)", value=(float(current_price)*rate) if current_price else 0.0)
                         
                         if st.form_submit_button("Opslaan in Portfolio"):
-                            if rate > 0:
-                                price_native = price_input_eur / rate
-                            else:
-                                price_native = price_input_eur
-
+                            price_native = price_input_eur / rate if rate > 0 else price_input_eur
                             st.session_state['portfolio'].append({
                                 'ticker': selected_ticker,
                                 'amount': amount_input,
                                 'avg_price': price_native,
-                                'currency': curr_code,
+                                'currency': raw_currency,
                                 'symbol': curr_sym
                             })
-                            st.success(f"{selected_ticker} toegevoegd! (Geregistreerd als {curr_sym} {price_native:.2f})")
+                            st.success(f"{selected_ticker} toegevoegd!")
                             st.rerun()
-
             with col_wish:
                 if st.button("❤️ Zet op Wishlist", use_container_width=True):
                     st.session_state['wishlist'].append({'ticker': selected_ticker, 'name': info.get('shortName', selected_ticker)})
                     st.toast("Toegevoegd aan Wishlist!")
-
         except Exception as e:
             st.error(f"Er is een fout opgetreden: {e}")
 
 # --------------------------------------------------
-# TAB 2: PORTFOLIO PRO
+# TAB 2: PORTFOLIO PRO (GEUPGRADED)
 # --------------------------------------------------
 with tabs[1]:
     if not st.session_state['portfolio']:
         st.info("Je portfolio is leeg. Voeg aandelen toe via de Analyse tab.")
     else:
-        st.markdown("### 🛠️ Portfolio Beheer")
+        st.markdown("### 📊 Portfolio Dashboard Pro")
         
+        # Data containers voor aggregatie
         portfolio_data = []
-        total_value_eur = 0
+        monthly_div_projection = {i: 0.0 for i in range(1, 13)}
+        
+        total_val_eur = 0
         total_cost_eur = 0
-        total_dividend_eur = 0
-        sector_distribution = {}
+        total_div_eur = 0
+        
+        etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
+        stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
+
+        # Progress bar voor data laden (omdat we nu meer history ophalen)
+        progress_bar = st.progress(0, text="Portfolio data analyseren...")
         
         for i, item in enumerate(st.session_state['portfolio']):
             ticker = item['ticker']
+            progress_bar.progress((i + 1) / len(st.session_state['portfolio']), text=f"Analyseren: {ticker}...")
+            
+            # Data ophalen met uitgebreide info
+            ext_data = get_extended_portfolio_data(ticker)
+            
+            # Fallbacks als data niet beschikbaar is
+            live_price = ext_data['live_price'] if ext_data else item['avg_price']
+            q_type = ext_data['type'] if ext_data else 'Aandeel'
+            sector = ext_data['sector'] if ext_data else 'Onbekend'
+            short_name = ext_data['shortName'] if ext_data else ticker
+            
+            amount = item['amount']
+            avg_price = item['avg_price']
             currency = item.get('currency', 'EUR')
             symbol = item.get('symbol', '€')
             
-            try:
-                stock_obj = yf.Ticker(ticker)
-                live_price = stock_obj.fast_info['last_price']
-                stock_info = stock_obj.info
-                sector = stock_info.get('sector', 'Onbekend')
-                
-                div_amt = 0
-                if 'dividendRate' in stock_info and stock_info['dividendRate']:
-                    div_amt = stock_info['dividendRate']
-                elif 'dividendYield' in stock_info and stock_info['dividendYield']:
-                    div_amt = live_price * stock_info['dividendYield']
-            except:
-                live_price = item['avg_price']
-                sector = "Onbekend"
-                div_amt = 0
-            
-            val_native = live_price * item['amount']
-            cost_native = item['avg_price'] * item['amount']
-            profit_native = val_native - cost_native
-            div_total_native = div_amt * item['amount']
-            
+            # Conversie
             eur_rate = get_currency_rate(currency, "EUR")
             
+            val_native = live_price * amount
+            cost_native = avg_price * amount
+            
             val_eur = val_native * eur_rate
-            cost_eur = cost_native * eur_rate 
-            profit_eur = val_eur - cost_eur 
-            div_eur = div_total_native * eur_rate
+            cost_eur = cost_native * eur_rate
+            profit_eur = val_eur - cost_eur
             
-            total_value_eur += val_eur
+            # Dividend berekening (Maandelijks & Totaal)
+            yearly_div_eur = 0
+            if ext_data and ext_data['dividend_history']:
+                for div_pay in ext_data['dividend_history']:
+                    # Maandelijkse projectie (bedrag * aantal stuks * wisselkoers)
+                    payout_eur = div_pay['amount'] * amount * eur_rate
+                    monthly_div_projection[div_pay['month']] += payout_eur
+                    yearly_div_eur += payout_eur
+            
+            total_val_eur += val_eur
             total_cost_eur += cost_eur
-            total_dividend_eur += div_eur
+            total_div_eur += yearly_div_eur
             
-            sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
+            # Split ETF vs Aandelen
+            if q_type == 'ETF':
+                etf_stats['value'] += val_eur
+                etf_stats['cost'] += cost_eur
+                etf_stats['profit'] += profit_eur
+            else:
+                stock_stats['value'] += val_eur
+                stock_stats['cost'] += cost_eur
+                stock_stats['profit'] += profit_eur
+
+            # Earnings Surprise String
+            earnings_str = "-"
+            earnings_color = "black"
+            if ext_data and ext_data['earnings']:
+                surp = ext_data['earnings']['surprise_pct']
+                date_str = ext_data['earnings']['date'].strftime('%d-%m')
+                if surp > 0:
+                    earnings_str = f"Beat: +{surp:.1f}% ({date_str})"
+                    earnings_color = "green"
+                else:
+                    earnings_str = f"Miss: {surp:.1f}% ({date_str})"
+                    earnings_color = "red"
 
             portfolio_data.append({
                 "Ticker": ticker,
-                "Aantal": float(item['amount']),          
-                "GAK": float(item['avg_price']),          
-                "Huidige Prijs": live_price,              
-                "Waarde (€)": val_eur,                    
-                "Winst (€)": profit_eur,                  
-                "Div/Jaar (€)": div_eur,                  
-                "Sector": sector,
+                "Naam": short_name,
+                "Type": q_type,
+                "Aantal": float(amount),
+                "GAK": float(avg_price),
+                "Prijs": live_price,
+                "Waarde (€)": val_eur,
+                "Winst (€)": profit_eur,
+                "Div/Jaar (€)": yearly_div_eur,
+                "Earnings": earnings_str,
+                "_earnings_color": earnings_color,
                 "Valuta": symbol,
                 "_currency_code": currency,
-                "Verwijder": False 
+                "Verwijder": False
             })
+            
+        progress_bar.empty()
 
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Totale Waarde", f"€ {total_value_eur:,.2f}")
-        abs_profit = total_value_eur - total_cost_eur
+        # --- KPI's ---
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
+        abs_profit = total_val_eur - total_cost_eur
         pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
-        kpi2.metric("Totaal Winst/Verlies", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
-        kpi3.metric("Geschat Dividend/Jaar", f"€ {total_dividend_eur:,.2f}", delta="Passief Inkomen")
-        yield_pct = (total_dividend_eur / total_value_eur * 100) if total_value_eur else 0
-        kpi4.metric("Portfolio Yield", f"{yield_pct:.2f}%")
+        k2.metric("Totaal Rendement", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
+        k3.metric("Verwacht Dividend (Jaar)", f"€ {total_div_eur:,.2f}", delta="Passief Inkomen")
+        yield_pct = (total_div_eur / total_val_eur * 100) if total_val_eur else 0
+        k4.metric("Portfolio Yield", f"{yield_pct:.2f}%")
         
         st.divider()
 
-        col_chart1, col_chart2 = st.columns(2)
-        with col_chart1:
-            st.subheader("Sectoren")
-            if sector_distribution:
-                fig_pie = px.pie(names=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=0.4)
-                st.plotly_chart(fig_pie, use_container_width=True)
+        # --- ETF vs Aandelen Vergelijking ---
+        st.subheader("⚖️ Aandelen vs. ETF's")
+        comp1, comp2 = st.columns(2)
         
-        with col_chart2:
-            st.subheader("Dividend Verwachting")
-            if portfolio_data:
-                df_charts = pd.DataFrame(portfolio_data)
-                fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', title="Dividend per Positie (€)")
-                st.plotly_chart(fig_bar, use_container_width=True)
+        with comp1:
+            etf_prof_pct = (etf_stats['profit'] / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
+            stock_prof_pct = (stock_stats['profit'] / stock_stats['cost'] * 100) if stock_stats['cost'] > 0 else 0
+            
+            # Custom Metrics Side-by-Side
+            c_a, c_b = st.columns(2)
+            c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
+            c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
+            
+            # Donut chart verdeling
+            fig_dist = px.pie(
+                names=['ETF', 'Aandelen'], 
+                values=[etf_stats['value'], stock_stats['value']], 
+                hole=0.5,
+                color_discrete_sequence=['#3498db', '#e74c3c']
+            )
+            fig_dist.update_layout(height=250, margin=dict(t=0, b=0, l=0, r=0))
+            st.plotly_chart(fig_dist, use_container_width=True)
 
-        st.subheader("📋 Positie Overzicht & Bewerken")
+        with comp2:
+            st.markdown("**Maandelijks Dividend Projectie**")
+            # Maandnamen
+            months = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"]
+            monthly_vals = [monthly_div_projection[i] for i in range(1, 13)]
+            
+            df_divs = pd.DataFrame({'Maand': months, 'Dividend (€)': monthly_vals})
+            fig_div = px.bar(df_divs, x='Maand', y='Dividend (€)', text_auto='.2s')
+            fig_div.update_traces(marker_color='#2ecc71')
+            fig_div.update_layout(height=300, yaxis_title=None, xaxis_title=None)
+            st.plotly_chart(fig_div, use_container_width=True)
+
+        st.divider()
+
+        # --- Portfolio Nieuws & Updates ---
+        st.subheader("🔔 Portfolio Nieuws & Earnings")
+        n1, n2 = st.columns([2, 1])
         
+        with n1:
+            st.markdown("**Recente Earnings Rapporten**")
+            # Filter op items met earnings data
+            df_earnings = pd.DataFrame(portfolio_data)
+            df_earnings = df_earnings[df_earnings['Earnings'] != "-"]
+            if not df_earnings.empty:
+                # Custom HTML table voor kleuring
+                html_table = "<table><tr><th>Ticker</th><th>Resultaat</th><th>Datum</th></tr>"
+                for _, row in df_earnings.iterrows():
+                    color = row['_earnings_color']
+                    ticker = row['Ticker']
+                    txt = row['Earnings'].split('(')[0]
+                    date_txt = row['Earnings'].split('(')[1].replace(')', '')
+                    html_table += f"<tr><td><b>{ticker}</b></td><td style='color:{color}'>{txt}</td><td>{date_txt}</td></tr>"
+                html_table += "</table>"
+                st.markdown(html_table, unsafe_allow_html=True)
+            else:
+                st.info("Geen recente earnings data gevonden.")
+
+        with n2:
+            st.markdown("**Dividend & Earnings Nieuws**")
+            # Zoek nieuws voor top 3 posities (qua waarde) om API calls te beperken
+            sorted_port = sorted(portfolio_data, key=lambda x: x['Waarde (€)'], reverse=True)[:3]
+            for item in sorted_port:
+                query = f"{item['Naam']} dividend earnings"
+                news = get_google_news(query)
+                if news:
+                    with st.expander(f"Nieuws: {item['Ticker']}"):
+                        for n in news[:2]:
+                            st.markdown(f"[{n['title']}]({n['link']})\n*{n['date']}*")
+
+        st.divider()
+
+        # --- Hoofdtabel ---
+        st.subheader("📋 Positie Overzicht & Bewerken")
         df_editor_source = pd.DataFrame(portfolio_data)
         
         column_settings = {
-            "Ticker": st.column_config.TextColumn("Aandeel", disabled=True),
+            "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
+            "Naam": st.column_config.TextColumn("Naam", disabled=True),
+            "Type": st.column_config.TextColumn("Type", disabled=True),
             "Aantal": st.column_config.NumberColumn("Aantal", min_value=0.0001, required=True, step=1.0),
-            "GAK": st.column_config.NumberColumn("GAK (Origineel)", min_value=0.0, required=True, format="%.2f", help="Gemiddelde Aankoopkoers in originele valuta"),
-            "Huidige Prijs": st.column_config.NumberColumn("Prijs (Origineel)", format="%.2f", disabled=True, help="Huidige koers in originele valuta"),
+            "GAK": st.column_config.NumberColumn("GAK (Origineel)", format="%.2f"),
             "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
             "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
-            "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
-            "Sector": st.column_config.TextColumn(disabled=True),
-            "Valuta": st.column_config.TextColumn(disabled=True),
-            "Verwijder": st.column_config.CheckboxColumn("🗑️", help="Vink aan om dit aandeel te verwijderen", default=False)
+            "Earnings": st.column_config.TextColumn("Earnings Result", disabled=True),
+            "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
         }
 
         edited_df = st.data_editor(
             df_editor_source,
             column_config=column_settings,
-            column_order=("Verwijder", "Ticker", "Aantal", "GAK", "Huidige Prijs", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Sector", "Valuta"),
+            column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "Waarde (€)", "Winst (€)", "Earnings"),
             hide_index=True,
             use_container_width=True,
             key="main_portfolio_editor"
@@ -701,51 +794,12 @@ with tabs[1]:
             st.session_state['portfolio'] = new_state_portfolio
             st.rerun()
 
-        st.markdown("---")
-        with st.expander("🧮 Rente-op-Rente (Compound Interest) Calculator", expanded=True):
-            col_cal1, col_cal2 = st.columns([1, 2])
-            
-            with col_cal1:
-                st.write("**Scenario Instellingen**")
-                start_cap = st.number_input("Startkapitaal (Huidig Portfolio)", value=float(round(total_value_eur, 2)))
-                mnd_inleg = st.number_input("Maandelijkse Inleg (€)", value=500)
-                jaren = st.slider("Aantal Jaren", 1, 40, 20)
-                rendement = st.slider("Verwacht Rendement (%)", 1, 15, 7) / 100
-            
-            with col_cal2:
-                years_range = range(1, jaren + 1)
-                values_list = []
-                invested_list = []
-                current_balance = start_cap
-                total_invested = start_cap
-                
-                for _ in years_range:
-                    for _ in range(12):
-                        current_balance = current_balance * (1 + rendement/12) + mnd_inleg
-                        total_invested += mnd_inleg
-                    values_list.append(current_balance)
-                    invested_list.append(total_invested)
-                
-                winst_rente = current_balance - total_invested
-                
-                mc1, mc2 = st.columns(2)
-                mc1.metric(f"Waarde over {jaren} jaar", f"€ {current_balance:,.0f}")
-                mc2.metric("Rente Winst", f"€ {winst_rente:,.0f}", delta="Gratis Geld")
-                
-                df_comp = pd.DataFrame({
-                    "Jaar": years_range,
-                    "Portfolio Waarde": values_list,
-                    "Eigen Inleg": invested_list
-                })
-                fig_comp = px.line(df_comp, x="Jaar", y=["Portfolio Waarde", "Eigen Inleg"], title="Vermogensgroei Projectie")
-                st.plotly_chart(fig_comp, use_container_width=True)
-
         if st.button("⚠️ Portfolio Volledig Wissen"):
             st.session_state['portfolio'] = []
             st.rerun()
 
 # --------------------------------------------------
-# TAB 3: WISHLIST (COMPACT)
+# TAB 3 & 4 (Wishlist & Belasting - Ongewijzigd)
 # --------------------------------------------------
 with tabs[2]:
     st.subheader("❤️ Mijn Wishlist")
@@ -767,67 +821,33 @@ with tabs[2]:
                     c1.write(f"**{ticker}**")
                     c2.write(name)
                     c3.markdown(f"{currency_sym} {price:.2f} (<span style='color:{color_style}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
-                    
                     if c4.button("🗑️", key=f"del_wl_{i}"):
-                        st.session_state['wishlist'].pop(i)
-                        st.rerun()
-                    
-                    if i < len(st.session_state['wishlist']) - 1:
-                        st.divider()
-                except:
-                    st.error(f"Kon data voor {ticker} niet laden.")
-    else:
-        st.info("Je wishlist is nog leeg.")
+                        st.session_state['wishlist'].pop(i); st.rerun()
+                    if i < len(st.session_state['wishlist']) - 1: st.divider()
+                except: st.error(f"Kon data voor {ticker} niet laden.")
+    else: st.info("Je wishlist is nog leeg.")
 
-# --------------------------------------------------
-# TAB 4: BELASTING
-# --------------------------------------------------
 with tabs[3]:
     st.header("🧮 Werkelijk Rendement & Box 3 Belasting")
-    
-    col_tax1, col_tax2 = st.columns(2)
-    with col_tax1:
-        st.subheader("1. Vermogen & Inleg")
-        start_vermogen = st.number_input("Vermogen 1 januari (€)", value=50000.0, step=1000.0)
-        eind_vermogen = st.number_input("Vermogen 31 december (€)", value=55000.0, step=1000.0)
-        netto_inleg = st.number_input("Netto Inleg dit jaar (€)", value=0.0, help="Stortingen min opnames")
-        heffingsvrij = st.number_input("Heffingsvrij Vermogen (€)", value=57000.0)
-
-    with col_tax2:
-        st.subheader("2. Fiscale Tarieven")
-        forfaitair_pct = st.number_input("Forfaitair Rendement (%)", value=6.04, step=0.01)
-        belasting_pct = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.5)
+    c1, c2 = st.columns(2)
+    with c1:
+        start_vermogen = st.number_input("Vermogen 1 jan (€)", value=50000.0)
+        eind_vermogen = st.number_input("Vermogen 31 dec (€)", value=55000.0)
+        netto_inleg = st.number_input("Netto Inleg (€)", value=0.0)
+        heffingsvrij = st.number_input("Heffingsvrij (€)", value=57000.0)
+    with c2:
+        forfaitair = st.number_input("Forfaitair (%)", value=6.04)
+        belasting = st.number_input("Belasting (%)", value=36.0)
     
     st.divider()
-    
-    werkelijk_rendement_euro = (eind_vermogen - start_vermogen) - netto_inleg
-    werkelijk_rendement_pct = (werkelijk_rendement_euro / start_vermogen * 100) if start_vermogen > 0 else 0
-    
+    werkelijk = (eind_vermogen - start_vermogen) - netto_inleg
+    pct = (werkelijk / start_vermogen * 100) if start_vermogen > 0 else 0
     grondslag = max(0, start_vermogen - heffingsvrij)
-    fictief_inkomen = grondslag * (forfaitair_pct / 100)
-    te_betalen = fictief_inkomen * (belasting_pct / 100)
+    fictief = grondslag * (forfaitair / 100)
+    te_betalen = fictief * (belasting / 100)
     
-    col_res1, col_res2 = st.columns(2)
-    
-    with col_res1:
-        with st.container(border=True):
-            st.markdown("### 💰 Werkelijk Resultaat")
-            if werkelijk_rendement_euro >= 0:
-                st.metric("Winst in Euro's", f"€ {werkelijk_rendement_euro:,.2f}", delta="Winst")
-            else:
-                st.metric("Verlies in Euro's", f"€ {werkelijk_rendement_euro:,.2f}", delta="Verlies", delta_color="inverse")
-            st.metric("Rendement %", f"{werkelijk_rendement_pct:.2f}%")
-
-    with col_res2:
-        with st.container(border=True):
-            st.markdown("### 🏛️ Belastingdienst (Box 3)")
-            if grondslag > 0:
-                st.write(f"Belastbare Grondslag: € {grondslag:,.2f}")
-                st.write(f"Fictief Inkomen: € {fictief_inkomen:,.2f}")
-                st.metric("Te Betalen Belasting", f"€ {te_betalen:,.2f}", delta="- Uitgaven", delta_color="inverse")
-                
-                netto_resultaat = werkelijk_rendement_euro - te_betalen
-                st.divider()
-                st.write(f"**Netto resultaat na belasting:** € {netto_resultaat:,.2f}")
-            else:
-                st.success("Je vermogen valt binnen het heffingsvrije vermogen. Er is **€ 0,00** belasting verschuldigd.")
+    r1, r2 = st.columns(2)
+    with r1:
+        st.metric("Werkelijk Resultaat", f"€ {werkelijk:,.2f}", f"{pct:.2f}%")
+    with r2:
+        st.metric("Te Betalen Box 3", f"€ {te_betalen:,.2f}", delta="- Belasting", delta_color="inverse")

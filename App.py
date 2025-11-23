@@ -41,7 +41,6 @@ TOOLTIPS = {
 # --- STATE MANAGEMENT ---
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
-# Deze state zorgt ervoor dat een geüpload bestand niet bij elke klik opnieuw wordt geladen (wat het portfolio zou resetten)
 if 'loaded_file_id' not in st.session_state: st.session_state['loaded_file_id'] = None
 
 # --- HELPERS ---
@@ -66,11 +65,9 @@ def get_finviz_data(ticker):
 
 @st.cache_data(ttl=300)
 def get_currency_rate(from_curr, to_curr="EUR"):
-    """Haalt wisselkoers op."""
     if from_curr == to_curr or not from_curr: return 1.0
     try:
-        # Correctie voor specifieke tickers indien nodig
-        if from_curr == "GBp": # Pence to Pounds
+        if from_curr == "GBp": 
             base_rate = get_currency_rate("GBP", to_curr)
             return base_rate / 100
 
@@ -78,7 +75,7 @@ def get_currency_rate(from_curr, to_curr="EUR"):
         data = yf.Ticker(ticker).history(period="1d")
         if not data.empty:
             rate = data['Close'].iloc[-1]
-            if from_curr == "USD" and rate > 1.05: return 1/rate # Soms geeft Yahoo EURUSD ipv USDEUR
+            if from_curr == "USD" and rate > 1.05: return 1/rate 
             return rate
         return 1.0
     except: return 1.0
@@ -218,10 +215,9 @@ def calculate_ai_score(data):
 st.sidebar.header("📂 Data")
 st.sidebar.download_button("⬇️ Download JSON", json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']}), "data.json")
 
-# Bestand uploaden (FIX: laad alleen als het bestand verandert, anders reset hij bij elke interactie)
+# Bestand uploaden (Met beveiliging tegen reset)
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload JSON", type=['json'])
 if uploaded_file:
-    # We gebruiken de bestandsnaam als unieke ID. Als die anders is dan vorige keer, laden we in.
     if st.session_state['loaded_file_id'] != uploaded_file.name:
         d = json.load(uploaded_file)
         st.session_state['portfolio'] = d.get('p', [])
@@ -229,7 +225,6 @@ if uploaded_file:
         st.session_state['loaded_file_id'] = uploaded_file.name
         st.toast(f"Portfolio '{uploaded_file.name}' succesvol geladen!")
     else:
-        # Als het bestand er al stond, doen we niks, zodat we handmatige toevoegingen niet overschrijven.
         pass
 
 if st.sidebar.button("🧹 Reset Cache"): st.cache_data.clear(); st.rerun()
@@ -275,7 +270,6 @@ with tabs[0]:
             curr_code = info.get('currency', 'EUR')
             cur_price = info.get('currentPrice') or info.get('regularMarketPreviousClose') or 0.0
             
-            # Data voor portfolio opslag
             p_sector = info.get('sector', 'Onbekend')
             p_div_yield = d['div'][0] if d['div'][0] else 0.0
             
@@ -380,29 +374,27 @@ with tabs[0]:
                         
                         amount = st.number_input("Aantal stuks", min_value=0.01, value=10.0, step=1.0)
                         
-                        # --- HIER ZIT DE WISSELKOERS LOGICA ---
-                        input_method = st.radio("Hoe wil je de prijs invoeren?", ["Prijs per aandeel (Origineel)", "Totaalbedrag in Euro's"])
+                        # --- HIER ZIT DE NIEUWE WISSELKOERS LOGICA ---
+                        use_eur = st.checkbox(f"Prijs invoeren in Euro's (€)?")
                         
-                        rate_curr_to_eur = get_currency_rate(curr_code, "EUR") # Bijv. USD -> EUR (0.95)
-                        
+                        rate_curr_to_eur = get_currency_rate(curr_code, "EUR")
                         price_to_save = 0.0
                         
-                        if input_method == "Totaalbedrag in Euro's":
-                            total_eur_input = st.number_input(f"Totaal betaald (€)", value=1000.0)
-                            st.caption(f"Huidige koers: 1 {curr_code} ≈ € {rate_curr_to_eur:.4f}")
-                            if rate_curr_to_eur > 0 and amount > 0:
-                                # Terugrekenen: Euro Totaal -> Euro per aandeel -> Origineel per aandeel
-                                price_per_share_eur = total_eur_input / amount
-                                price_to_save = price_per_share_eur / rate_curr_to_eur
-                                st.write(f"➡️ Berekende prijs: {curr_sym} {price_to_save:.2f} per aandeel")
+                        if use_eur:
+                            # Invoer in Euro's per aandeel
+                            price_eur_input = st.number_input("Aankoopprijs per aandeel (€)", value=float(cur_price * rate_curr_to_eur))
+                            if rate_curr_to_eur > 0:
+                                price_to_save = price_eur_input / rate_curr_to_eur
+                                st.caption(f"Omgerekend naar originele valuta: {curr_sym} {price_to_save:.2f}")
                         else:
-                            price_to_save = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(cur_price))
+                            # Invoer in originele valuta
+                            price_to_save = st.number_input(f"Aankoopprijs per aandeel ({curr_sym})", value=float(cur_price))
 
                         if st.form_submit_button("Opslaan in Portfolio"):
                             st.session_state['portfolio'].append({
                                 'ticker': sel, 
                                 'amount': amount, 
-                                'avg_price': price_to_save, # We slaan altijd op in native valuta voor consistente winst berekening
+                                'avg_price': price_to_save, 
                                 'currency': curr_code,
                                 'symbol': curr_sym,
                                 'sector': p_sector,
@@ -436,7 +428,6 @@ with tabs[1]:
             sym = item.get('symbol', '€')
             sec = item.get('sector', 'Overig')
             
-            # Live koers ophalen
             try:
                 live_price = yf.Ticker(t).fast_info['last_price']
             except: live_price = item['avg_price']
@@ -444,11 +435,9 @@ with tabs[1]:
             val_raw = live_price * item['amount']
             cost_raw = item['avg_price'] * item['amount']
             
-            # Winst/Verlies per regel (in originele valuta)
             gain_loss = val_raw - cost_raw
             gain_loss_pct = (gain_loss / cost_raw) * 100 if cost_raw != 0 else 0
             
-            # Conversie naar EUR voor totaaloverzicht
             rate_to_eur = get_currency_rate(curr, "EUR")
             val_eur = val_raw * rate_to_eur
             cost_eur = cost_raw * rate_to_eur
@@ -456,12 +445,10 @@ with tabs[1]:
             tot_val_eur += val_eur
             tot_cost_eur += cost_eur
             
-            # Dividend berekening (Schatting per jaar)
             div_y = item.get('div_yield', 0.0)
             est_income = (val_eur * (div_y / 100))
             tot_div_eur += est_income
             
-            # Sector data
             sector_dist[sec] = sector_dist.get(sec, 0) + val_eur
 
             p_data.append({
@@ -476,7 +463,6 @@ with tabs[1]:
             
         df = pd.DataFrame(p_data)
         
-        # --- PORTFOLIO METRICS ---
         st.subheader("Overzicht")
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)
         
@@ -488,10 +474,8 @@ with tabs[1]:
         col_m3.metric("Totaal Winst/Verlies", f"€ {abs_profit:,.2f}", f"{growth_pct:.1f}%")
         col_m4.metric("Geschat Jaarlijks Dividend", f"€ {tot_div_eur:,.2f}", f"{(tot_div_eur/tot_val_eur)*100:.1f}% Yield")
 
-        # --- TABEL ---
         st.dataframe(df, use_container_width=True, hide_index=True)
         
-        # --- VISUALS ---
         col_graph, col_calc = st.columns([1, 1])
         
         with col_graph:
@@ -509,7 +493,6 @@ with tabs[1]:
                 years = st.slider("Aantal jaar", 1, 30, 10)
                 interest = st.slider("Verwacht rendement (%)", 1, 15, 7)
                 
-                final_val = start_cap * (1 + interest/100)**years
                 current = start_cap
                 for y in range(years):
                     current = current * (1 + interest/100) + (monthly_add * 12)
@@ -524,7 +507,7 @@ with tabs[1]:
         st.info("Je portfolio is nog leeg. Voeg aandelen toe via de Analyse tab.")
 
 # ==================================================
-# 3. WISHLIST (ALLEEN LIJSTJE)
+# 3. WISHLIST
 # ==================================================
 with tabs[2]:
     if st.session_state['wishlist']:
@@ -533,14 +516,12 @@ with tabs[2]:
             ticker = w['ticker']
             name = w['name']
             
-            # Snel live data ophalen
             try:
                 fi = yf.Ticker(ticker).fast_info
                 price = fi['last_price']
                 prev = fi['previous_close']
                 pct_change = ((price - prev) / prev) * 100
                 
-                # Kleur bepalen voor percentage
                 color = "green" if pct_change >= 0 else "red"
                 sign = "+" if pct_change >= 0 else ""
                 
@@ -584,17 +565,13 @@ with tabs[3]:
             perc_debt = st.number_input("Fictief % Schulden", value=2.50, format="%.2f")
             tax_rate = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=1.0)
             
-            # Berekening Fictief Rendement
             fict_savings = savings * (perc_savings / 100)
             fict_invest = investments * (perc_invest / 100)
             fict_debt = debts * (perc_debt / 100)
             
             total_fict_return = fict_savings + fict_invest - fict_debt
-            
-            # Rendementspercentage op totaal vermogen
             avg_return_perc = (total_fict_return / total_assets * 100) if total_assets > 0 else 0
             
-            # Belasting berekenen
             taxable_return = (avg_return_perc / 100) * taxable_base
             tax_to_pay = taxable_return * (tax_rate / 100)
             

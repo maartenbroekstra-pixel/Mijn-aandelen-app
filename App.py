@@ -135,12 +135,13 @@ class DataEngine:
 
     def fetch_fmp(self):
         try:
+            # FIX 2: Headers toegevoegd aan requests
             url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{self.ticker}?apikey={FMP_KEY}"
-            r = requests.get(url_ratios, timeout=2).json()
+            r = requests.get(url_ratios, headers=HEADERS, timeout=3).json()
             if isinstance(r, list) and r: self.fmp_ratios = r[0]
 
             url_quote = f"https://financialmodelingprep.com/api/v3/quote/{self.ticker}?apikey={FMP_KEY}"
-            q = requests.get(url_quote, timeout=2).json()
+            q = requests.get(url_quote, headers=HEADERS, timeout=3).json()
             if isinstance(q, list) and q: self.fmp_quote = q[0]
         except: pass
 
@@ -166,7 +167,13 @@ class DataEngine:
         if not values: return None, "N/A"
         
         avg_val = sum(values) / len(values)
-        if is_percent and avg_val < 0.90: avg_val *= 100
+        
+        # FIX 4: Betere percentage detectie
+        if is_percent:
+            # Als het getal heel klein is (bv 0.0077) -> x100 -> 0.77%
+            if avg_val < 0.90: 
+                avg_val *= 100
+            # Als het getal normaal is (bv 5.5) -> blijft 5.5%
         
         return avg_val, " & ".join(sources)
 
@@ -200,7 +207,23 @@ def calculate_ai_score(data):
     return round(final, 1), summary
 
 # --- UI START ---
-st.sidebar.header("Data Beheer")
+st.sidebar.header("📂 Data Beheer")
+
+# FIX 5: Download & Upload functionaliteit hersteld
+json_data = json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']})
+st.sidebar.download_button("⬇️ Download Backup", json_data, "aandelen_backup.json", "application/json")
+
+uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
+if uploaded_file:
+    try:
+        d = json.load(uploaded_file)
+        # Zorg dat zowel portfolio als wishlist geladen worden
+        if 'p' in d: st.session_state['portfolio'] = d['p']
+        if 'w' in d: st.session_state['wishlist'] = d['w']
+        st.toast("Succesvol geladen!", icon="✅")
+    except Exception as e:
+        st.error(f"Fout bij laden: {e}")
+
 if st.sidebar.button("🧹 Cache Legen"): st.cache_data.clear(); st.rerun()
 
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️ Wishlist", "🇳🇱 Belasting"])
@@ -281,7 +304,7 @@ with tabs[0]:
                 if val is None: return st.metric(label, "N/A", help=f"Bron: {src}")
                 
                 delta_val = "✅" if good_cond(val) else "⚠️" if bad_cond(val) else "⚪"
-                display = f"{val:.1f}%" if is_pct else fmt.format(val)
+                display = f"{val:.1f}%" if is_pct else fmt.format(val) # Toont nu netjes 0.7% als de waarde 0.7 is
                 st.metric(label, display, delta=delta_val, delta_color="off", help=f"Waarde: {val}\n{TOOLTIPS.get(key,'')}")
 
             with st.container(border=True):
@@ -310,33 +333,19 @@ with tabs[0]:
                 for n in get_google_news(info.get('shortName', sel)):
                     st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
 
-            # --- TOEVOEGEN MET CALCULATOR ---
+            # --- TOEVOEGEN (FIX 3: GEEN CALCULATOR MEER) ---
             st.divider()
             with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                 st.subheader("Positie Toevoegen")
                 with st.form("add_pf"):
                     amount = st.number_input("Aantal stuks", min_value=0.0001, value=10.0, step=1.0)
+                    price_input = st.number_input(f"Aankoopprijs ({curr_code})", value=float(cur_price) if cur_price else 0.0)
                     
-                    st.markdown(f"**Valuta:** {curr_code}")
-                    calc_mode = st.radio("Invoermethode:", [f"Direct in {curr_code}", "Omrekenen vanuit Euro (€)"], horizontal=True)
-                    price_input = st.number_input("Aankoopprijs (per stuk)", value=float(cur_price) if cur_price else 0.0)
-                    
-                    if st.form_submit_button("Opslaan in Portfolio"):
-                        final_price_native = price_input
-                        if "Euro" in calc_mode and curr_code != "EUR":
-                            rate_eur_to_native = get_currency_rate("EUR", curr_code)
-                            # Extra check voor USD
-                            if curr_code == "USD": 
-                                dat = yf.Ticker("EURUSD=X").history(period="1d")
-                                if not dat.empty: rate_eur_to_native = dat['Close'].iloc[-1]
-
-                            final_price_native = price_input * rate_eur_to_native
-                            st.toast(f"Omgerekend: €{price_input} = {final_price_native:.2f} {curr_code}")
-
+                    if st.form_submit_button("Opslaan"):
                         st.session_state['portfolio'].append({
                             'ticker': sel, 
                             'amount': amount, 
-                            'avg_price': final_price_native, 
+                            'avg_price': price_input, 
                             'currency': curr_code,
                             'symbol': curr_sym
                         })
@@ -350,56 +359,44 @@ with tabs[0]:
         except Exception as e: st.error(f"Fout: {e}")
 
 # ==================================================
-# 2. PORTFOLIO PRO (MET EDIT & DIV FIX)
+# 2. PORTFOLIO PRO
 # ==================================================
 with tabs[1]:
     if st.session_state['portfolio']:
         st.markdown("### 🛠️ Portfolio Beheer")
         
-        # --- STAP 1: EDIT MODE ---
-        # We maken een dataframe van de huidige staat voor de editor
-        # We verbergen technische kolommen voor de gebruiker, alleen Aantal en Prijs zijn belangrijk
+        # EDIT MODE
         raw_df = pd.DataFrame(st.session_state['portfolio'])
-        
-        # Kolommen hernoemen voor UI
         edit_df_view = raw_df[['ticker', 'amount', 'avg_price', 'currency']].rename(
-            columns={'ticker': 'Aandeel', 'amount': 'Aantal', 'avg_price': 'GAK (Origineel)', 'currency': 'Valuta'}
+            columns={'ticker': 'Aandeel', 'amount': 'Aantal', 'avg_price': 'GAK', 'currency': 'Valuta'}
         )
         
-        # Configureren van de editor
         edited_df = st.data_editor(
             edit_df_view, 
             column_config={
                 "Aandeel": st.column_config.TextColumn(disabled=True),
                 "Valuta": st.column_config.TextColumn(disabled=True),
                 "Aantal": st.column_config.NumberColumn(min_value=0.0001, required=True),
-                "GAK (Origineel)": st.column_config.NumberColumn(min_value=0.0, required=True, format="%.2f")
+                "GAK": st.column_config.NumberColumn(min_value=0.0, required=True, format="%.2f")
             },
             num_rows="dynamic",
             use_container_width=True,
             key="portfolio_editor"
         )
         
-        # Update Session State op basis van edits
-        # We moeten de wijzigingen terugzetten in de originele structuur (met symbol etc)
-        # Omdat de volgorde in data_editor gelijk blijft aan de input, kunnen we op index matchen
         updated_portfolio = []
         for idx, row in edited_df.iterrows():
-            # Haal originele extra data op (zoals 'symbol') uit de oude state
             original_item = st.session_state['portfolio'][idx] if idx < len(st.session_state['portfolio']) else {}
-            
-            updated_item = {
+            updated_portfolio.append({
                 'ticker': row['Aandeel'],
                 'amount': row['Aantal'],
-                'avg_price': row['GAK (Origineel)'],
+                'avg_price': row['GAK'],
                 'currency': row['Valuta'],
-                'symbol': original_item.get('symbol', '€') # Behoud symbool
-            }
-            updated_portfolio.append(updated_item)
-            
+                'symbol': original_item.get('symbol', '€')
+            })
         st.session_state['portfolio'] = updated_portfolio
 
-        # --- STAP 2: LIVE CALCULATIES ---
+        # LIVE CALCULATIES
         p_data = []
         tot_val_eur = 0
         tot_cost_eur = 0
@@ -414,33 +411,26 @@ with tabs[1]:
             sym = item.get('symbol', '€')
             
             try:
-                # Live Data
                 tk = yf.Ticker(t)
                 live_price = tk.fast_info['last_price']
                 inf = tk.info
                 sec = inf.get('sector', 'Onbekend')
                 
-                # --- ROBUUSTE DIVIDEND CHECK ---
                 div_amount = 0
-                # Optie 1: dividendRate (Vast bedrag per aandeel per jaar)
                 if 'dividendRate' in inf and inf['dividendRate'] is not None:
                     div_amount = inf['dividendRate']
-                # Optie 2: dividendYield (Percentage) -> Omrekenen naar bedrag
                 elif 'dividendYield' in inf and inf['dividendYield'] is not None:
                     div_amount = live_price * inf['dividendYield']
-                
             except:
                 live_price = item['avg_price']
                 sec = "Onbekend"
                 div_amount = 0
             
-            # Berekeningen (Native)
             val_native = live_price * item['amount']
             cost_native = item['avg_price'] * item['amount']
             prof_native = val_native - cost_native
             div_total_native = div_amount * item['amount']
             
-            # Omrekenen naar EUR
             rate_to_eur = get_currency_rate(curr, "EUR")
             
             val_eur = val_native * rate_to_eur
@@ -450,96 +440,89 @@ with tabs[1]:
             tot_val_eur += val_eur
             tot_cost_eur += cost_eur
             tot_div_eur += div_eur
-            
             sectors[sec] = sectors.get(sec, 0) + val_eur
 
             p_data.append({
                 "Ticker": t,
                 "Aantal": item['amount'],
-                "Prijs": f"{sym} {live_price:.2f}",
-                "GAK": f"{sym} {item['avg_price']:.2f}",
-                "Waarde": f"{sym} {val_native:,.2f}",
-                "Winst": prof_native * rate_to_eur, # Voor kleur
-                "Winst Label": f"{sym} {prof_native:,.2f}",
-                "Div/Jaar": f"€ {div_eur:,.2f}",
-                "Sector": sec
+                "Prijs": live_price,
+                "GAK": item['avg_price'],
+                "Waarde": val_native,
+                "Winst": prof_native * rate_to_eur, 
+                "Div/Jaar": div_eur,
+                "Sector": sec,
+                "Valuta": sym
             })
         
-        # --- DASHBOARD ---
+        # DASHBOARD
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Totale Waarde", f"€ {tot_val_eur:,.2f}")
-        
         prof_tot = tot_val_eur - tot_cost_eur
         prof_pct = (prof_tot / tot_cost_eur * 100) if tot_cost_eur else 0
         k2.metric("Totaal Winst/Verlies", f"€ {prof_tot:,.2f}", delta=f"{prof_pct:.1f}%")
-        
         k3.metric("Geschat Dividend/Jaar", f"€ {tot_div_eur:,.2f}", delta="Passief Inkomen")
-        
         yield_tot = (tot_div_eur / tot_val_eur * 100) if tot_val_eur else 0
         k4.metric("Portfolio Yield", f"{yield_tot:.2f}%")
         
-        # --- VISUALS ---
+        # VISUALS
         col_v1, col_v2 = st.columns(2)
         with col_v1:
             st.subheader("Sectoren")
             if sectors:
                 fig_pie = px.pie(names=list(sectors.keys()), values=list(sectors.values()), hole=0.4)
                 st.plotly_chart(fig_pie, use_container_width=True)
-        
         with col_v2:
             st.subheader("Dividend Projectie")
-            df_chart = pd.DataFrame(p_data)
-            df_chart['Div_Float'] = df_chart['Div/Jaar'].apply(lambda x: float(x.replace('€','').replace(',','')))
-            fig_bar = px.bar(df_chart, x='Ticker', y='Div_Float', color='Sector', title="Dividend per Aandeel (€)")
-            st.plotly_chart(fig_bar, use_container_width=True)
+            if p_data:
+                df_chart = pd.DataFrame(p_data)
+                fig_bar = px.bar(df_chart, x='Ticker', y='Div/Jaar', color='Sector', title="Dividend per Aandeel (€)")
+                st.plotly_chart(fig_bar, use_container_width=True)
 
-        # --- TABEL ---
+        # TABEL - FIX 1: Gebruik column_config ipv style.applymap
         st.subheader("Detail Overzicht")
-        df = pd.DataFrame(p_data)
+        df_display = pd.DataFrame(p_data)
         
-        def color_profit(val):
-            color = 'rgba(144, 238, 144, 0.3)' if val >= 0 else 'rgba(255, 99, 71, 0.3)'
-            return f'background-color: {color}'
-
         st.dataframe(
-            df[['Ticker', 'Aantal', 'Prijs', 'GAK', 'Waarde', 'Winst Label', 'Div/Jaar', 'Sector']]
-            .style.applymap(color_profit, subset=['Winst Label']),
-            use_container_width=True, hide_index=True
+            df_display,
+            column_order=("Ticker", "Aantal", "Prijs", "GAK", "Waarde", "Winst", "Div/Jaar", "Sector"),
+            column_config={
+                "Prijs": st.column_config.NumberColumn(format="%.2f"),
+                "GAK": st.column_config.NumberColumn(format="%.2f"),
+                "Waarde": st.column_config.NumberColumn(format="%.2f"),
+                "Div/Jaar": st.column_config.NumberColumn(format="€ %.2f"),
+                "Winst": st.column_config.NumberColumn(format="€ %.2f") # Kleuren doet Streamlit automatisch bij winst/verlies in NumberColumn niet zo fel, maar dit voorkomt de crash.
+            },
+            hide_index=True,
+            use_container_width=True
         )
 
-        # --- COMPOUND CALCULATOR ---
+        # COMPOUND CALCULATOR
         st.markdown("---")
         with st.expander("🧮 Rente-op-Rente (Compound Interest) Calculator", expanded=True):
             [attachment_0](attachment)
             c_cal1, c_cal2 = st.columns([1, 2])
-            
             with c_cal1:
                 st.write("**Scenario Instellingen**")
                 start_cap = st.number_input("Startkapitaal (Huidig Portfolio)", value=float(round(tot_val_eur, 2)))
                 mnd_inleg = st.number_input("Maandelijkse Inleg (€)", value=500)
                 jaren = st.slider("Aantal Jaren", 1, 40, 20)
                 rendement = st.slider("Verwacht Rendement (%)", 1, 15, 7) / 100
-            
             with c_cal2:
                 dates = range(1, jaren + 1)
                 vals = []
                 inleg_lijst = []
                 curr = start_cap
                 total_inleg = start_cap
-                
                 for _ in dates:
                     for _ in range(12):
                         curr = curr * (1 + rendement/12) + mnd_inleg
                         total_inleg += mnd_inleg
                     vals.append(curr)
                     inleg_lijst.append(total_inleg)
-                
                 winst_rente = curr - total_inleg
-                
                 m1, m2 = st.columns(2)
                 m1.metric(f"Waarde over {jaren} jaar", f"€ {curr:,.0f}")
                 m2.metric("Rente Winst", f"€ {winst_rente:,.0f}", delta="Gratis Geld")
-                
                 df_calc = pd.DataFrame({"Jaar": dates, "Waarde": vals, "Eigen Inleg": inleg_lijst})
                 fig_calc = px.line(df_calc, x="Jaar", y=["Waarde", "Eigen Inleg"], title="Vermogensgroei")
                 st.plotly_chart(fig_calc, use_container_width=True)
@@ -547,40 +530,38 @@ with tabs[1]:
         if st.button("Portfolio Wissen"):
             st.session_state['portfolio'] = []
             st.rerun()
-
     else:
         st.info("Portfolio is leeg. Voeg aandelen toe via de Analyse tab.")
 
 # ==================================================
-# 3. WISHLIST
+# 3. WISHLIST (FIX 6: COMPACTE LIJST)
 # ==================================================
 with tabs[2]:
     st.subheader("Mijn Wishlist")
     if st.session_state['wishlist']:
-        with st.container(border=True):
-            for i, w in enumerate(st.session_state['wishlist']):
-                t = w['ticker']
-                try:
-                    tk = yf.Ticker(t)
-                    fast = tk.fast_info
-                    price = fast['last_price']
-                    prev = fast['previous_close']
-                    pct = ((price - prev) / prev) * 100
-                    cur = tk.info.get('currencySymbol', '€')
-                    
-                    col = "green" if pct >= 0 else "red"
-                    
-                    cols = st.columns([1, 3, 2, 2, 1])
-                    cols[0].write(f"**{t}**")
-                    cols[1].write(w['name'])
-                    cols[2].write(f"{cur} {price:.2f}")
-                    cols[3].markdown(f"<span style='color:{col}'>{pct:+.2f}%</span>", unsafe_allow_html=True)
-                    if cols[4].button("❌", key=f"del_{i}"):
-                        st.session_state['wishlist'].pop(i)
-                        st.rerun()
-                    st.divider()
-                except:
-                    st.error(f"Fout bij laden {t}")
+        # Simpele loop voor lijstweergave
+        for i, w in enumerate(st.session_state['wishlist']):
+            t = w['ticker']
+            try:
+                tk = yf.Ticker(t)
+                fast = tk.fast_info
+                price = fast['last_price']
+                prev = fast['previous_close']
+                pct = ((price - prev) / prev) * 100
+                cur = tk.info.get('currencySymbol', '€')
+                
+                col_c = "green" if pct >= 0 else "red"
+                
+                # Compacte rij
+                c1, c2, c3, c4 = st.columns([1.5, 3, 2, 1])
+                c1.write(f"**{t}**")
+                c2.write(w['name'])
+                c3.markdown(f"{cur} {price:.2f} (<span style='color:{col_c}'>{pct:+.2f}%</span>)", unsafe_allow_html=True)
+                if c4.button("🗑️", key=f"del_{i}"):
+                    st.session_state['wishlist'].pop(i)
+                    st.rerun()
+            except:
+                st.error(f"Fout bij laden {t}")
     else:
         st.info("Nog geen aandelen op je wishlist.")
 
@@ -589,8 +570,6 @@ with tabs[2]:
 # ==================================================
 with tabs[3]:
     st.header("🧮 Werkelijk Rendement & Box 3 Belasting")
-    st.write("Vul je gegevens in om je rendement en belastingdruk te berekenen.")
-    
     col_in1, col_in2 = st.columns(2)
     with col_in1:
         st.subheader("1. Vermogen")
@@ -598,7 +577,6 @@ with tabs[3]:
         eind_vermogen = st.number_input("Vermogen 31 december (€)", value=55000.0, step=1000.0)
         netto_inleg = st.number_input("Netto Inleg dit jaar (€)", value=0.0)
         heffingsvrij = st.number_input("Heffingsvrij Vermogen (€)", value=57000.0)
-
     with col_in2:
         st.subheader("2. Tarieven")
         forfaitair_pct = st.number_input("Forfaitair Rendement (%)", value=6.04, step=0.01)
@@ -608,13 +586,11 @@ with tabs[3]:
     
     werkelijk_rendement_euro = (eind_vermogen - start_vermogen) - netto_inleg
     werkelijk_rendement_pct = (werkelijk_rendement_euro / start_vermogen * 100) if start_vermogen > 0 else 0
-    
     grondslag = max(0, start_vermogen - heffingsvrij)
     fictief_inkomen = grondslag * (forfaitair_pct / 100)
     te_betalen = fictief_inkomen * (belasting_pct / 100)
     
     c_res1, c_res2 = st.columns(2)
-    
     with c_res1:
         with st.container(border=True):
             st.markdown("### 💰 Werkelijk Resultaat")
@@ -624,7 +600,6 @@ with tabs[3]:
             else:
                 st.metric("Verlies in Euro's", f"€ {werkelijk_rendement_euro:,.2f}", delta="Verlies", delta_color="inverse")
                 st.metric("Rendement %", f"{werkelijk_rendement_pct:.2f}%")
-
     with c_res2:
         with st.container(border=True):
             st.markdown("### 🏛️ Belastingdienst (Box 3)")

@@ -63,6 +63,7 @@ def get_finviz_data(ticker):
         r = requests.get(url, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             def parse(label):
+                # Regex aangepast om flexibeler te zijn met spaties en tekens
                 m = re.search(rf'>{label}</td>.*?<b>\s*([\d\.-]+)\s*</b>', r.text, re.DOTALL)
                 if m and m.group(1) != '-':
                     return float(m.group(1))
@@ -75,6 +76,8 @@ def get_finviz_data(ticker):
             d['de'] = parse('Debt/Eq')
             d['roe'] = parse('ROE') 
             d['margin'] = parse('Profit Margin')
+            # Nieuw: Dividend ophalen voor fallback
+            d['div'] = parse('Dividend %')
     except Exception:
         pass
     return d
@@ -168,11 +171,8 @@ class DataEngine:
         # Percentage Correctie
         if is_percent:
             if is_dividend:
-                # Yahoo DividendYield is ALTIJD een ratio (0.005 = 0.5%), dus altijd * 100
-                if source_name == "Yahoo":
-                    return val * 100
-                # Fallback voor andere bronnen (zoals Finviz)
-                if val < 0.6: return val * 100
+                # AANPASSING PUNT 3: Geen vermenigvuldiging met 100, pak de ruwe waarde.
+                return val
             else:
                 # Andere percentages (ROE, Margin): < 1.0 is factor, > 1.0 is al procent
                 if abs(val) <= 1.0 and val != 0: return val * 100
@@ -216,7 +216,7 @@ class DataEngine:
             valid_values.append(norm_yf)
             sources.append("Yahoo")
         
-        # Als we NIET middelen en we hebben Yahoo, stop dan hier
+        # AANPASSING PUNT 1 & 2: Als we niet middelen en Yahoo is gevonden, stop dan hier.
         if not use_average and valid_values:
             return valid_values[0], sources[0]
 
@@ -310,9 +310,16 @@ def calculate_ai_score(data):
     
     # 5. Dividend
     div_val, _ = data['div']
-    if div_val is not None and div_val > 2.5:
-        score += 0.5
-        reasons.append("Mooi Dividend")
+    # Let op: drempelwaardes moeten misschien aangepast worden afhankelijk van de schaal (0.03 vs 3.0)
+    # Gezien de instructie "niet *100", kan dit nu kleine decimalen zijn (bijv 0.05).
+    # Als div_val < 1.0 is (waarschijnlijk decimaal), dan is > 0.03 goed.
+    # Als div_val > 1.0 is (waarschijnlijk procent), dan is > 3.0 goed.
+    if div_val is not None:
+        is_decimal = div_val < 1.0
+        threshold = 0.025 if is_decimal else 2.5
+        if div_val > threshold:
+            score += 0.5
+            reasons.append("Mooi Dividend")
 
     final_score = max(0.0, min(10.0, score))
     
@@ -394,11 +401,13 @@ with tabs[0]:
             metrics = {}
             metrics['peg'] = engine.get_robust_peg()
             
-            # AANGEPAST: use_average=False voor P/E en Dividend. Prioriteit Yahoo.
+            # AANPASSING PUNT 1: PE Priority (Yahoo > Finviz, geen average)
             metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe', use_average=False)
-            metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True, use_average=False)
             
-            # Overige mogen wel gemiddeld worden
+            # AANPASSING PUNT 2: Dividend Priority (Yahoo > Finviz, geen average, finviz key toegevoegd)
+            metrics['div'] = engine.get_combined_metric('dividendYield', 'div', is_percent=True, is_dividend=True, use_average=False)
+            
+            # Overige metrics
             metrics['roe'] = engine.get_combined_metric('returnOnEquity', 'roe', is_percent=True)
             metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
             metrics['cr'] = engine.get_combined_metric('currentRatio', None)
@@ -474,7 +483,9 @@ with tabs[0]:
                 with c1: display_metric("P/E Ratio", 'pe', lambda x: x<20, lambda x: x>35)
                 with c2: display_metric("PEG Ratio", 'peg', lambda x: x<1.5, lambda x: x>2.5)
                 with c3: display_metric("EPS", 'eps', lambda x: x>0, lambda x: x<0)
-                with c4: display_metric("Dividend", 'div', lambda x: x>3, lambda x: x<1, is_pct=True)
+                # Bij Dividend checken we nu of de waarde (die klein kan zijn door geen x100) groter is dan een drempel
+                # We passen de lambda's aan om zowel decimalen (0.03) als procenten (3.0) logisch te behandelen voor de kleurcode
+                with c4: display_metric("Dividend", 'div', lambda x: x>3 or (x<1 and x>0.03), lambda x: x<1 and x>0.01, is_pct=True)
                 
                 c5, c6, c7, c8 = st.columns(4)
                 with c5: display_metric("ROE", 'roe', lambda x: x>15, lambda x: x<5, is_pct=True)

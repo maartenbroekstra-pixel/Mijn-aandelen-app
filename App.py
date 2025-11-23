@@ -1,14 +1,12 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
 import plotly.express as px
 import requests
 import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
-import numpy as np
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
@@ -19,7 +17,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Mapping: EU Ticker -> US Ticker
+# Mapping: EU Ticker -> US Ticker (voor metrics die FMP beter in US heeft)
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -35,7 +33,6 @@ TOOLTIPS = {
     "roe": "Rendement op Eigen Vermogen.\n🟢 > 15%: Sterk management.",
     "de": "Debt/Equity Ratio.\n🟢 < 1.0: Gezond.\n🔴 > 2.0: Veel schulden.",
     "cr": "Current Ratio (Liquiditeit).\n🟢 > 1.5: Veilig.\n🔴 < 1.0: Krap.",
-    "pb": "Prijs / Boekwaarde.\n🟢 < 3.0: Redelijk.",
     "div": "Dividend Rendement.\n🟢 > 3%: Interessant.",
     "margin": "Nettowinstmarge.\n🟢 > 20%: Hoge marge.",
     "eps": "Winst per aandeel.\n🟢 > 0: Winstgevend.",
@@ -45,7 +42,7 @@ TOOLTIPS = {
 if 'portfolio' not in st.session_state: st.session_state['portfolio'] = []
 if 'wishlist' not in st.session_state: st.session_state['wishlist'] = []
 
-# --- SCRAPERS & HELPERS ---
+# --- HELPERS ---
 
 @st.cache_data(ttl=600)
 def get_finviz_data(ticker):
@@ -68,6 +65,7 @@ def get_finviz_data(ticker):
 
 @st.cache_data(ttl=300)
 def get_currency_rate(from_curr, to_curr="EUR"):
+    """Haalt wisselkoers op (alleen gebruikt voor Portfolio Totaal berekening)"""
     if from_curr == to_curr or not from_curr: return 1.0
     try:
         ticker = "EUR=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
@@ -80,14 +78,35 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     except: return 1.0
 
 def search_yahoo_strict(query):
+    """Zoekt aandelen en sorteert EU/DE bovenaan"""
     try:
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=10"
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&region=DE&quotesCount=15"
         r = requests.get(url, headers=HEADERS, timeout=3)
         d = r.json()
         res = []
-        if 'quotes' in d:
-            for q in d['quotes']:
-                res.append(f"{q['symbol']} | {q.get('shortname','')}")
+        raw_quotes = d.get('quotes', [])
+        
+        # Sorteer Logica: 
+        # 1. Amsterdam (.AS)
+        # 2. Duitsland (.DE, .F, .XETRA)
+        # 3. Andere EU (.PA, .BR, .MC, .MI)
+        # 4. US (geen punt of lengte < 5 vaak)
+        def sort_key(q):
+            s = q.get('symbol', '')
+            if s.endswith('.AS'): return 0
+            if s.endswith('.DE') or s.endswith('.F'): return 1
+            if any(s.endswith(x) for x in ['.PA', '.BR', '.MI', '.MC', '.LS']): return 2
+            if '.' not in s: return 10 # US stock
+            return 20 # Overig
+
+        # Sorteren
+        raw_quotes.sort(key=sort_key)
+
+        for q in raw_quotes:
+            s = q.get('symbol')
+            n = q.get('shortname') or q.get('longname') or s
+            res.append(f"{s} | {n}")
+            
         return res
     except: return []
 
@@ -115,15 +134,14 @@ def get_youtube_video_id(query):
 
 class DataEngine:
     def __init__(self, ticker, original_ticker):
-        self.ticker = ticker  # US Ticker (FMP/Finviz)
-        self.original_ticker = original_ticker # Yahoo
+        self.ticker = ticker  # US Ticker (voor FMP/Finviz)
+        self.original_ticker = original_ticker # Originele (Yahoo)
         self.yf_obj = yf.Ticker(original_ticker)
         self.yf_info = self.yf_obj.info
         self.fmp_ratios = {}
         self.fmp_quote = {}
         self.finviz_data = {}
         
-        # Parallel ophalen zou mooier zijn, maar serieel is stabieler
         self.fetch_fmp()
         self.fetch_finviz()
 
@@ -139,7 +157,9 @@ class DataEngine:
         except: pass
 
     def fetch_finviz(self):
-        self.finviz_data = get_finviz_data(self.ticker)
+        # Alleen Finviz gebruiken als de input een US ticker lijkt (geen punt)
+        if "." not in self.ticker:
+            self.finviz_data = get_finviz_data(self.ticker)
 
     def get_combined_metric(self, key_yf, key_fmp_ratio, key_fmp_quote=None, key_finviz=None, is_percent=False):
         values = []
@@ -166,9 +186,6 @@ class DataEngine:
         
         # Percentage Logica
         if is_percent:
-            # Als avg < 0.5 (bijv 0.15) -> waarschijnlijk factor -> x100
-            # Als avg > 2.0 (bijv 15.0) -> waarschijnlijk al % -> laten staan
-            # Uitzondering: hele kleine percentages (dividend 0.05 vs 5.0)
             if avg_val < 0.90: avg_val *= 100
         
         src_str = " & ".join(sources)
@@ -179,48 +196,42 @@ def calculate_ai_score(data):
     score, count = 0, 0
     reasons = []
     
-    # Rules: (Value, Name, Good Condition, Bad Condition, GoodMsg, BadMsg)
     rules = [
-        (data['peg'][0], "PEG", lambda x: 0<x<1.5, lambda x: x>2.5, "Goedkoop gewaardeerd (PEG)", "Te duur t.o.v. groei (PEG)"),
-        (data['pe'][0], "P/E", lambda x: 0<x<20, lambda x: x>40, "Aantrekkelijke P/E", "Hoge premie (P/E)"),
-        (data['roe'][0], "ROE", lambda x: x>15, lambda x: x<5, "Sterk rendement (ROE)", "Zwak management (ROE)"),
-        (data['de'][0], "D/E", lambda x: x<1.0, lambda x: x>2.0, "Gezonde balans", "Veel schulden"),
-        (data['cr'][0], "Current", lambda x: x>1.5, lambda x: x<0.9, "Goede liquiditeit", "Liquiditeitsproblemen?"),
-        (data['margin'][0], "Marge", lambda x: x>15, lambda x: x<2, "Hoge marges", "Dunne marges"),
-        (data['eps'][0], "EPS", lambda x: x>0, lambda x: x<0, "Winstgevend", "Verlieslatend")
+        (data['peg'][0], "PEG", lambda x: 0<x<1.5, lambda x: x>2.5, "Goedkoop (PEG)", "Te duur (PEG)"),
+        (data['pe'][0], "P/E", lambda x: 0<x<20, lambda x: x>40, "Goede P/E", "Hoge P/E"),
+        (data['roe'][0], "ROE", lambda x: x>15, lambda x: x<5, "Sterke ROE", "Zwakke ROE"),
+        (data['de'][0], "D/E", lambda x: x<1.0, lambda x: x>2.0, "Veilige balans", "Veel schuld"),
+        (data['cr'][0], "Current", lambda x: x>1.5, lambda x: x<0.9, "Liquide", "Krap bij kas"),
+        (data['margin'][0], "Marge", lambda x: x>15, lambda x: x<2, "Hoge winstmarge", "Lage winstmarge"),
+        (data['eps'][0], "EPS", lambda x: x>0, lambda x: x<0, "Maakt winst", "Maakt verlies")
     ]
     
     for val, name, good, bad, g_msg, b_msg in rules:
         if val is not None:
             count += 1
-            if good(val): 
-                score += 1; reasons.append(g_msg)
-            elif bad(val):
-                reasons.append(b_msg)
-            else:
-                score += 0.5 # Neutraal
+            if good(val): score += 1; reasons.append(g_msg)
+            elif bad(val): reasons.append(b_msg)
+            else: score += 0.5 
             
     final = (score/count)*10 if count > 0 else 5.0
     
-    # Samenvatting genereren
     summary = "Het bedrijf scoort gemiddeld."
-    if final >= 7.5: summary = f"Sterk aandeel! Positieve punten: {', '.join(reasons[:2]).lower()}."
-    elif final <= 4.5: summary = f"Risicovol aandeel. Let op: {', '.join(reasons[:2]).lower()}."
-    elif reasons: summary = f"Gemengd beeld. Plus: {reasons[0].lower()}, maar let op {reasons[-1].lower()}."
+    if final >= 7.5: summary = f"Sterk aandeel! ({', '.join(reasons[:2]).lower()})"
+    elif final <= 4.5: summary = f"Risicovol. ({', '.join(reasons[:2]).lower()})"
+    elif reasons: summary = f"Gemengd beeld: {reasons[0].lower()} maar {reasons[-1].lower()}."
     
     return round(final, 1), summary
 
-# --- UI SETUP ---
-st.sidebar.header("Data Beheer")
+# --- UI START ---
+st.sidebar.header("📂 Data")
 st.sidebar.download_button("⬇️ Download JSON", json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']}), "data.json")
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload JSON", type=['json'])
 if uploaded_file:
     d = json.load(uploaded_file)
     st.session_state['portfolio'] = d.get('p', [])
     st.session_state['wishlist'] = d.get('w', [])
-    st.toast("Data geladen!")
-
-if st.sidebar.button("🧹 Cache Legen"): st.cache_data.clear(); st.rerun()
+    st.toast("Geladen!")
+if st.sidebar.button("🧹 Reset Cache"): st.cache_data.clear(); st.rerun()
 
 tabs = st.tabs(["🔎 Analyse", "📊 Portfolio", "❤️ Wishlist", "🇳🇱 Belasting"])
 
@@ -231,29 +242,27 @@ with tabs[0]:
     c_search, c_per = st.columns([3, 1])
     with c_search:
         dq = st.session_state.get('search_query', "")
-        txt = st.text_input("Zoek aandeel:", value=dq, placeholder="Bijv: ASML, SHELL, TSLA...", key="search_main")
+        txt = st.text_input("Zoek aandeel (Bijv: shell, asml, tsla):", value=dq, key="search_main")
         sel = None
         if txt:
             if "." in txt and " " not in txt: sel = txt
             else:
                 res = search_yahoo_strict(txt)
-                if res: sel = st.selectbox("Selecteer:", res).split(" | ")[0]
+                if res: sel = st.selectbox("Resultaten (gesorteerd op EU):", res).split(" | ")[0]
                 else: sel = txt.upper()
     with c_per:
         per = st.selectbox("Periode", ["1mo", "6mo", "1y", "5y", "max"], index=2)
 
     if sel:
         try:
-            # Mapping
+            # Mapping voor Metrics (gebruik US ticker voor FMP indien mogelijk)
             us_ticker = EU_TO_US_MAP.get(sel, sel.split('.')[0] if '.' in sel else sel)
             
-            # Engine Init
             engine = DataEngine(us_ticker, sel)
             info = engine.yf_info
             
-            # Metrics Ophalen (Combinatie)
+            # Data verzamelen
             d = {}
-            # YahooKey, FMPRatio, FMPQuote, FinvizKey, IsPercent
             d['peg'] = engine.get_combined_metric('pegRatio', 'pegRatioTTM', None, 'peg')
             d['pe'] = engine.get_combined_metric('trailingPE', 'peRatioTTM', 'pe', 'pe')
             d['roe'] = engine.get_combined_metric('returnOnEquity', 'returnOnEquityTTM', None, None, True)
@@ -264,39 +273,37 @@ with tabs[0]:
             d['eps'] = engine.get_combined_metric('trailingEps', 'netIncomePerShareTTM', 'eps', 'eps')
             d['div'] = engine.get_combined_metric('dividendYield', 'dividendYielTTM', None, None, True)
             
-            # Targets & Prices
+            # --- GEEN CONVERSIE MEER ---
+            # We halen het symbool op en tonen de ruwe prijs
+            curr_sym = info.get('currencySymbol', info.get('currency', ''))
             cur_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
-            curr_sym = info.get('currencySymbol', '€')
             
-            # Target logic: Yahoo > Finviz
+            # Target
             tgt_val = info.get('targetMeanPrice')
             tgt_src = "Yahoo"
             if not tgt_val:
                 tgt_val = engine.finviz_data.get('target')
                 tgt_src = "Finviz"
             
-            # AI Check
             score, summary = calculate_ai_score(d)
 
-            # --- HEADER SECTION ---
+            # --- HEADER ---
             with st.container(border=True):
-                # Row 1: Title, Price, Target
                 h1, h2, h3 = st.columns([2, 1, 1])
                 with h1:
                     st.title(info.get('shortName', sel))
-                    st.caption(f"Ticker: {sel} | Data: {us_ticker}")
+                    st.caption(f"Ticker: {sel} | Valuta: {info.get('currency', '?')}")
                 with h2:
-                    st.metric("Huidige Koers", f"{curr_sym}{cur_price:.2f}" if cur_price else "-")
+                    st.metric("Huidige Koers", f"{curr_sym} {cur_price:.2f}" if cur_price else "-")
                 with h3:
                     if tgt_val and cur_price:
                         delta = (tgt_val - cur_price) / cur_price
-                        st.metric("Koersdoel", f"{curr_sym}{tgt_val:.2f}", f"{delta:.1%}", help=f"Bron: {tgt_src}")
+                        st.metric("Koersdoel", f"{curr_sym} {tgt_val:.2f}", f"{delta:.1%}", help=f"Bron: {tgt_src}")
                     else:
                         st.metric("Koersdoel", "N/A")
 
                 st.divider()
                 
-                # Row 2: AI Score & Summary
                 a1, a2 = st.columns([1, 4])
                 with a1:
                     col = "green" if score >= 7 else "orange" if score >= 5 else "red"
@@ -309,7 +316,7 @@ with tabs[0]:
                     st.subheader("AI Oordeel")
                     st.write(summary)
             
-            # --- METRICS GRID MET KLEUREN (DELTA) ---
+            # --- METRICS ---
             st.subheader("📊 Fundamentals")
             
             def m_col(label, key, good_cond, bad_cond, fmt="{:.2f}", is_pct=False):
@@ -321,21 +328,18 @@ with tabs[0]:
                 display_val = fmt.format(val)
                 if is_pct: display_val = f"{val:.1f}%"
                 
-                # Kleur bepalen via 'delta'
-                # Streamlit delta kleuren: Positive=Groen, Negative=Rood, Off=Grijs
-                # We misbruiken dit voor status
                 delta_val = None
                 delta_color = "off"
                 
                 if good_cond(val):
                     delta_val = "✅ Goed"
-                    delta_color = "normal" # Groen
+                    delta_color = "normal"
                 elif bad_cond(val):
                     delta_val = "⚠️ Let op"
-                    delta_color = "inverse" # Rood
+                    delta_color = "inverse"
                 else:
                     delta_val = "⚪ Neutraal"
-                    delta_color = "off" # Grijs
+                    delta_color = "off"
                 
                 st.metric(label, display_val, delta=delta_val, delta_color=delta_color, help=f"Waarde: {val}\nBron: {src}\n{TOOLTIPS.get(key,'')}")
 
@@ -352,19 +356,18 @@ with tabs[0]:
                 with c7: m_col("Debt/Eq", 'de', lambda x: x<1, lambda x: x>2)
                 with c8: m_col("Current", 'cr', lambda x: x>1.5, lambda x: x<1)
 
-            # --- GRAFIEK & MEDIA ---
+            # --- GRAFIEK ---
             c_g, c_m = st.columns([2, 1])
             with c_g:
                 hist = engine.yf_obj.history(period=per)
                 if not hist.empty:
                     fig = px.area(hist, x=hist.index, y='Close', title=f"Koersverloop ({per})")
-                    fig.update_layout(yaxis_title="Prijs", showlegend=False)
+                    fig.update_layout(yaxis_title=f"Prijs ({curr_sym})", showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
             
             with c_m:
                 st.markdown("##### 📰 Nieuws")
-                news = get_google_news(info.get('shortName', sel))
-                for n in news:
+                for n in get_google_news(info.get('shortName', sel)):
                     st.markdown(f"[{n['title']}]({n['link']})\n*{n['date']}*")
                 
                 st.markdown("##### 📺 Video")
@@ -379,12 +382,15 @@ with tabs[0]:
                     with st.form("add_pf"):
                         st.markdown(f"**{sel} toevoegen**")
                         amount = st.number_input("Aantal stuks", min_value=1.0, value=10.0, step=1.0)
-                        price_in = st.number_input("Aankoopprijs (per stuk)", value=float(cur_price) if cur_price else 0.0)
+                        # We slaan de valuta ook op in de portfolio
+                        price_in = st.number_input(f"Aankoopprijs ({curr_sym})", value=float(cur_price) if cur_price else 0.0)
                         if st.form_submit_button("Opslaan"):
                             st.session_state['portfolio'].append({
                                 'ticker': sel, 
                                 'amount': amount, 
-                                'avg_price_eur': price_in
+                                'avg_price': price_in,
+                                'currency': info.get('currency', 'EUR'),
+                                'symbol': curr_sym
                             })
                             st.success("Toegevoegd!")
                             st.rerun()
@@ -394,7 +400,7 @@ with tabs[0]:
                     st.toast("Toegevoegd aan Wishlist!")
 
         except Exception as e:
-            st.error(f"Fout bij ophalen data: {e}")
+            st.error(f"Fout: {e}")
 
 # ==================================================
 # 2. PORTFOLIO
@@ -402,48 +408,48 @@ with tabs[0]:
 with tabs[1]:
     if st.session_state['portfolio']:
         p_data = []
-        tot_val = 0
-        tot_cost = 0
+        tot_val_eur = 0
+        tot_cost_eur = 0
         
         for item in st.session_state['portfolio']:
             t = item['ticker']
+            curr = item.get('currency', 'EUR')
+            sym = item.get('symbol', '€')
+            
             # Live koers ophalen
             try:
-                cp = yf.Ticker(t).fast_info['last_price']
-            except: cp = item['avg_price_eur']
+                # fast_info is snel en geeft ruwe prijs in aandeel valuta
+                live_price = yf.Ticker(t).fast_info['last_price']
+            except: live_price = item['avg_price']
             
-            val = cp * item['amount']
-            cost = item['avg_price_eur'] * item['amount']
-            tot_val += val
-            tot_cost += cost
+            val_raw = live_price * item['amount']
+            cost_raw = item['avg_price'] * item['amount']
+            
+            # Voor de totaalberekening bovenaan MOETEN we omrekenen naar EUR
+            rate_to_eur = get_currency_rate(curr, "EUR")
+            tot_val_eur += val_raw * rate_to_eur
+            tot_cost_eur += cost_raw * rate_to_eur
             
             p_data.append({
                 "Aandeel": t,
+                "Valuta": curr,
                 "Aantal": item['amount'],
-                "GAK": item['avg_price_eur'],
-                "Huidig": cp,
-                "Waarde": val,
-                "Winst": val - cost,
-                "Winst %": ((val-cost)/cost)*100 if cost else 0
+                "GAK": f"{sym} {item['avg_price']:.2f}",
+                "Huidig": f"{sym} {live_price:.2f}",
+                "Waarde": f"{sym} {val_raw:.2f}",
+                "Winst": f"{sym} {val_raw - cost_raw:.2f}"
             })
             
         df = pd.DataFrame(p_data)
         
+        # Totaalblok (altijd in Euro's voor overzicht)
+        st.caption("Totaal portfolio wordt omgerekend naar EUR voor het totaaloverzicht.")
         k1, k2, k3 = st.columns(3)
-        k1.metric("Totale Waarde", f"€ {tot_val:,.2f}")
-        diff = tot_val - tot_cost
-        k2.metric("Totaal Winst/Verlies", f"€ {diff:,.2f}", delta=f"{((diff)/tot_cost)*100:.1f}%" if tot_cost else "0%")
+        k1.metric("Totale Waarde (EUR)", f"€ {tot_val_eur:,.2f}")
+        diff = tot_val_eur - tot_cost_eur
+        k2.metric("Totaal Winst (EUR)", f"€ {diff:,.2f}", delta=f"{(diff/tot_cost_eur)*100:.1f}%" if tot_cost_eur else "0%")
         
-        st.dataframe(
-            df.style.format({
-                "GAK": "€{:.2f}", 
-                "Huidig": "€{:.2f}", 
-                "Waarde": "€{:.2f}", 
-                "Winst": "€{:.2f}",
-                "Winst %": "{:.1f}%"
-            }),
-            use_container_width=True, hide_index=True
-        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
         
         if st.button("Portfolio Wissen"):
             st.session_state['portfolio'] = []
@@ -475,6 +481,6 @@ with tabs[3]:
     vrij = st.number_input("Vrijstelling", value=57000)
     if verm > vrij:
         st.write(f"Belastbaar: € {verm-vrij}")
-        st.write(f"Geschatte belasting (2024 tarief): € {(verm-vrij)*0.0604*0.36:.2f}")
+        st.write(f"Geschatte belasting: € {(verm-vrij)*0.0604*0.36:.2f}")
     else:
         st.success("Geen belasting verschuldigd.")

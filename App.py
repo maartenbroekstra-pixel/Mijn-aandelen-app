@@ -90,13 +90,17 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     if from_curr == to_curr or not from_curr: 
         return 1.0
     try:
-        # Yahoo ticker format: EURUSD=X betekent 1 EUR = x USD
-        ticker = "EUR=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
+        # We gebruiken EURUSD=X. Dit geeft aan hoeveel USD je krijgt voor 1 EUR (bijv 1.05)
+        # Als we USD naar EUR willen, moeten we 1 / koers doen.
+        
+        ticker = "EURUSD=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
         data = yf.Ticker(ticker).history(period="1d")
+        
         if not data.empty:
             rate = data['Close'].iloc[-1]
             if from_curr == "USD": 
-                # Als Yahoo zegt 1 EUR = 1.05 USD, dan is 1 USD = 1/1.05 EUR
+                # Yahoo: 1 EUR = 1.05 USD.
+                # Dus 1 USD = 1 / 1.05 EUR.
                 return 1.0 / rate 
             return rate
         return 1.0
@@ -355,10 +359,19 @@ with tabs[0]:
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
             metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True)
             
-            # Prijzen & Valuta (STRIKTE DISPLAY LOGICA)
-            # We gebruiken hier de currencySymbol van de daadwerkelijke data
-            curr_sym = info.get('currencySymbol', '€')
-            curr_code = info.get('currency', 'EUR')
+            # Prijzen & Valuta (STRIKTE DISPLAY LOGICA + CORRECTIE)
+            # We forceren hier het symbool op basis van de currency code, omdat Yahoo soms '€' geeft voor USD.
+            raw_currency = info.get('currency', 'EUR').upper()
+            if raw_currency == 'USD':
+                curr_sym = '$'
+            elif raw_currency == 'EUR':
+                curr_sym = '€'
+            elif raw_currency == 'GBP':
+                curr_sym = '£'
+            else:
+                curr_sym = info.get('currencySymbol', '€')
+
+            curr_code = raw_currency
             current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
             
             # Koersdoel
@@ -468,7 +481,11 @@ with tabs[0]:
                     rate = 1.0
                     if curr_code != "EUR":
                         rate = get_currency_rate(curr_code, "EUR")
-                        st.info(f"Koers gebruikt voor berekening: 1 {curr_code} = € {rate:.4f}")
+                        # 1 USD = 0.95 EUR (rate)
+                        # 1 EUR = 1.05 USD (1/rate)
+                        reverse_rate = 1.0 / rate if rate > 0 else 0
+                        st.info(f"Koers gebruikt: 1 {curr_code} = € {rate:.4f} (1 EUR ≈ {curr_code} {reverse_rate:.2f})")
+                        
                         # Huidige prijs in EUR voor referentie
                         cur_price_eur = (float(current_price) * rate) if current_price else 0.0
                         st.write(f"Huidige koers: {curr_sym} {current_price} (≈ € {cur_price_eur:.2f})")

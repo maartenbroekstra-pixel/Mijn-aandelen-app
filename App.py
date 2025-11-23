@@ -15,9 +15,11 @@ from datetime import datetime
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
 # API Key voor Financial Modeling Prep
+# TIP: Maak een gratis account op https://site.financialmodelingprep.com/ en plak hier je eigen key.
+# De huidige key is een publieke demo key die vaak gelimiteerd is.
 FMP_KEY = "nhXfJ0SDaXmUEVKy5icfcwzQOHqOn5QE"
 
-# Headers om 403 foutmeldingen bij FMP/Yahoo te voorkomen
+# Headers om 403 foutmeldingen bij Yahoo te voorkomen
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -186,23 +188,33 @@ class DataEngine:
         self.fetch_finviz()
 
     def fetch_fmp(self):
-        """Haalt data op van Financial Modeling Prep API."""
+        """Haalt data op van Financial Modeling Prep API met fallback."""
         if not FMP_KEY: return
         try:
-            # Ratios Endpoint
-            # LET OP: Headers verwijderd voor FMP, want FMP is een officiële API en kan headers soms blokkeren.
+            # 1. Probeer Ratios TTM (Vaak Premium, maar meest actueel)
+            # We gebruiken hier GEEN headers, want FMP API kan soms blokkeren op user-agents.
             url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{self.ticker}?apikey={FMP_KEY}"
-            r = requests.get(url_ratios, timeout=3).json()
-            if isinstance(r, list) and r: 
-                self.fmp_ratios = r[0]
+            r = requests.get(url_ratios, timeout=4)
+            data = r.json()
+            
+            if isinstance(data, list) and data: 
+                self.fmp_ratios = data[0]
+            else:
+                # 2. FALLBACK: Probeer jaarlijkse Ratios (Vaak wel beschikbaar in Free tier)
+                # Als TTM faalt of leeg is (door limitaties), pakken we de laatste jaarcijfers.
+                url_ratios_annual = f"https://financialmodelingprep.com/api/v3/ratios/{self.ticker}?limit=1&apikey={FMP_KEY}"
+                r_ann = requests.get(url_ratios_annual, timeout=4).json()
+                if isinstance(r_ann, list) and r_ann:
+                    self.fmp_ratios = r_ann[0]
 
-            # Quote Endpoint (voor extra realtime data)
+            # 3. Quote Endpoint (voor extra realtime data, vaak wel beschikbaar)
             url_quote = f"https://financialmodelingprep.com/api/v3/quote/{self.ticker}?apikey={FMP_KEY}"
-            q = requests.get(url_quote, timeout=3).json()
+            q = requests.get(url_quote, timeout=4).json()
             if isinstance(q, list) and q: 
                 self.fmp_quote = q[0]
+                
         except Exception as e:
-            # Silent fail, we vallen terug op Yahoo
+            # Bij fouten (bv netwerk of API limit) gaan we stil door en gebruiken Yahoo
             pass
 
     def fetch_finviz(self):

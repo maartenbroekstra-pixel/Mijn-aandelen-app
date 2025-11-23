@@ -355,7 +355,8 @@ with tabs[0]:
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
             metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True)
             
-            # Prijzen & Valuta
+            # Prijzen & Valuta (STRIKTE DISPLAY LOGICA)
+            # We gebruiken hier de currencySymbol van de daadwerkelijke data
             curr_sym = info.get('currencySymbol', '€')
             curr_code = info.get('currency', 'EUR')
             current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
@@ -439,6 +440,7 @@ with tabs[0]:
                 hist_data = engine.yf_obj.history(period=chart_period)
                 if not hist_data.empty:
                     fig = px.area(hist_data, x=hist_data.index, y='Close', title=f"Koersverloop ({chart_period})")
+                    # Zorg dat de Y-as ook de juiste valuta toont
                     fig.update_layout(yaxis_title=f"Prijs ({curr_sym})")
                     st.plotly_chart(fig, use_container_width=True)
             
@@ -462,31 +464,41 @@ with tabs[0]:
                 with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                     st.subheader("Positie Toevoegen")
                     
-                    # Valuta Check & Converter voor input
+                    # Huidige rate bepalen voor de input conversie
                     rate = 1.0
                     if curr_code != "EUR":
                         rate = get_currency_rate(curr_code, "EUR")
-                        st.info(f"💱 Wisselkoers: 1 {curr_code} = € {rate:.4f}")
-                    
+                        st.info(f"Koers gebruikt voor berekening: 1 {curr_code} = € {rate:.4f}")
+                        # Huidige prijs in EUR voor referentie
+                        cur_price_eur = (float(current_price) * rate) if current_price else 0.0
+                        st.write(f"Huidige koers: {curr_sym} {current_price} (≈ € {cur_price_eur:.2f})")
+                    else:
+                        st.write(f"Huidige koers: € {current_price}")
+
                     with st.form("add_position_form"):
                         amount_input = st.number_input("Aantal stuks", min_value=0.0001, value=10.0, step=1.0)
-                        # Input prijs is in originele valuta (zoals de gebruiker het ziet in de app/broker)
-                        price_input = st.number_input(f"Aankoopprijs per stuk ({curr_sym})", value=float(current_price) if current_price else 0.0)
                         
-                        # Live berekening weergave (indien niet EUR)
-                        if curr_code != "EUR":
-                            eur_total = price_input * amount_input * rate
-                            st.caption(f"💶 Totale aankoopwaarde: € {eur_total:,.2f}")
-
+                        # HIER IS DE WIJZIGING: Input is nu in EURO
+                        # We stellen de default in op de huidige omgerekende koers
+                        default_eur_price = (float(current_price) * rate) if current_price else 0.0
+                        price_input_eur = st.number_input("Aankoopprijs per stuk (€)", value=default_eur_price)
+                        
                         if st.form_submit_button("Opslaan in Portfolio"):
+                            # TERUGREKENEN NAAR ORIGINELE VALUTA
+                            # Als input €100 is en rate is 0.90 (1 USD = 0.90 EUR), dan is USD prijs: 100 / 0.90
+                            if rate > 0:
+                                price_native = price_input_eur / rate
+                            else:
+                                price_native = price_input_eur # Fallback
+
                             st.session_state['portfolio'].append({
                                 'ticker': selected_ticker,
                                 'amount': amount_input,
-                                'avg_price': price_input, # We slaan op in originele valuta
+                                'avg_price': price_native, # We slaan op in originele valuta voor correcte P&L later
                                 'currency': curr_code,
                                 'symbol': curr_sym
                             })
-                            st.success(f"{selected_ticker} toegevoegd!")
+                            st.success(f"{selected_ticker} toegevoegd! (Geregistreerd als {curr_sym} {price_native:.2f})")
                             st.rerun()
 
             with col_wish:
@@ -554,7 +566,7 @@ with tabs[1]:
             eur_rate = get_currency_rate(currency, "EUR")
             
             val_eur = val_native * eur_rate
-            cost_eur = cost_native * eur_rate # We gebruiken huidige koers voor benadering historische kosten in EUR (simplistisch, maar effectief voor huidig overzicht)
+            cost_eur = cost_native * eur_rate 
             profit_eur = val_eur - cost_eur # Winst in euro's (incl valuta resultaat)
             div_eur = div_total_native * eur_rate
             

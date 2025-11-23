@@ -14,17 +14,12 @@ from datetime import datetime
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# API Key voor Financial Modeling Prep
-# TIP: Maak een gratis account op https://site.financialmodelingprep.com/ en plak hier je eigen key.
-# De huidige key is een publieke demo key die vaak gelimiteerd is.
-FMP_KEY = "nhXfJ0SDaXmUEVKy5icfcwzQOHqOn5QE"
-
-# Headers om 403 foutmeldingen bij Yahoo te voorkomen
+# Headers om 403 foutmeldingen bij Yahoo/Finviz te voorkomen
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Mapping van Europese tickers naar US tickers (voor betere data dekking bij FMP)
+# Mapping van Europese tickers naar US tickers (voor data dekking bij Finviz)
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -81,6 +76,7 @@ def get_finviz_data(ticker):
             d['target'] = parse('Target Price')
             d['eps'] = parse('EPS \(ttm\)')
             d['pe'] = parse('P/E')
+            d['de'] = parse('Debt/Eq') # Fallback voor D/E
     except Exception:
         pass
     return d
@@ -170,63 +166,29 @@ def get_youtube_video_id(query):
         return None
 
 # ==================================================
-# 4. DATA ENGINE CLASS (INTEGRATIE YAHOO & FMP)
+# 4. DATA ENGINE CLASS (INTEGRATIE YAHOO & FINVIZ)
 # ==================================================
 
 class DataEngine:
     def __init__(self, ticker, original_ticker):
-        self.ticker = ticker  # Ticker voor FMP (vaak US)
+        self.ticker = ticker  # Ticker voor Finviz (vaak US)
         self.original_ticker = original_ticker # Ticker voor Yahoo (origineel)
         self.yf_obj = yf.Ticker(original_ticker)
         self.yf_info = self.yf_obj.info
-        self.fmp_ratios = {}
-        self.fmp_quote = {}
         self.finviz_data = {}
         
         # Data ophalen bij initialisatie
-        self.fetch_fmp()
         self.fetch_finviz()
-
-    def fetch_fmp(self):
-        """Haalt data op van Financial Modeling Prep API met fallback."""
-        if not FMP_KEY: return
-        try:
-            # 1. Probeer Ratios TTM (Vaak Premium, maar meest actueel)
-            # We gebruiken hier GEEN headers, want FMP API kan soms blokkeren op user-agents.
-            url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{self.ticker}?apikey={FMP_KEY}"
-            r = requests.get(url_ratios, timeout=4)
-            data = r.json()
-            
-            if isinstance(data, list) and data: 
-                self.fmp_ratios = data[0]
-            else:
-                # 2. FALLBACK: Probeer jaarlijkse Ratios (Vaak wel beschikbaar in Free tier)
-                # Als TTM faalt of leeg is (door limitaties), pakken we de laatste jaarcijfers.
-                url_ratios_annual = f"https://financialmodelingprep.com/api/v3/ratios/{self.ticker}?limit=1&apikey={FMP_KEY}"
-                r_ann = requests.get(url_ratios_annual, timeout=4).json()
-                if isinstance(r_ann, list) and r_ann:
-                    self.fmp_ratios = r_ann[0]
-
-            # 3. Quote Endpoint (voor extra realtime data, vaak wel beschikbaar)
-            url_quote = f"https://financialmodelingprep.com/api/v3/quote/{self.ticker}?apikey={FMP_KEY}"
-            q = requests.get(url_quote, timeout=4).json()
-            if isinstance(q, list) and q: 
-                self.fmp_quote = q[0]
-                
-        except Exception as e:
-            # Bij fouten (bv netwerk of API limit) gaan we stil door en gebruiken Yahoo
-            pass
 
     def fetch_finviz(self):
         """Haalt data op van Finviz als het een US aandeel is."""
         if "." not in self.ticker:
             self.finviz_data = get_finviz_data(self.ticker)
 
-    def get_combined_metric(self, key_yf, key_fmp_ratio, key_fmp_quote=None, key_finviz=None, is_percent=False, is_dividend=False):
+    def get_combined_metric(self, key_yf, key_finviz=None, is_percent=False, is_dividend=False, is_debt_equity=False):
         """
-        Combineert datapunten van Yahoo, FMP en Finviz.
-        Berekent het gemiddelde als er meerdere bronnen zijn.
-        Geeft waarde en bronstring terug.
+        Combineert datapunten van Yahoo en Finviz.
+        Prioriteit ligt bij Yahoo. Finviz is backup.
         """
         values = []
         sources = []
@@ -237,16 +199,8 @@ class DataEngine:
             values.append(float(val_yf))
             sources.append("Yahoo")
         
-        # 2. Check FMP
-        val_fmp = self.fmp_ratios.get(key_fmp_ratio)
-        if val_fmp is None and key_fmp_quote:
-            val_fmp = self.fmp_quote.get(key_fmp_quote)
-        if val_fmp is not None:
-            values.append(float(val_fmp))
-            sources.append("FMP")
-        
-        # 3. Check Finviz
-        if key_finviz:
+        # 2. Check Finviz (alleen als Yahoo faalt, om dubbeling te voorkomen, of als we middelen)
+        if key_finviz and not values:
             val_fin = self.finviz_data.get(key_finviz)
             if val_fin is not None:
                 values.append(float(val_fin))
@@ -256,16 +210,24 @@ class DataEngine:
         if not values:
             return None, "N/A"
         
-        avg_val = sum(values) / len(values)
+        avg_val = values[0] # We pakken de primaire bron
         
-        # Percentage correctie
-        if is_percent:
+        # --- CORRECTIE LOGICA ---
+        
+        # 1. Debt/Equity Correctie
+        # Yahoo geeft D/E vaak als 150 (voor 150%). Wij willen ratio 1.5.
+        if is_debt_equity:
+            if avg_val > 5.0: # Als het groter is dan 5, is het waarschijnlijk een percentage
+                avg_val /= 100.0
+
+        # 2. Percentage Correctie
+        elif is_percent:
             if is_dividend:
-                # Speciale logica voor Dividend: < 0.6 betekent waarschijnlijk factor (0.05 = 5%), dus * 100
+                # Dividend: < 0.6 betekent waarschijnlijk factor (0.05 = 5%), dus * 100
                 if avg_val < 0.6:
                     avg_val *= 100
             else:
-                # Standaard logica voor andere percentages (ROE, Margin): < 1.0 betekent factor
+                # Andere percentages (ROE, Margin): < 1.0 betekent factor, > 1.0 is al procent
                 if abs(avg_val) <= 1.0 and avg_val != 0:
                     avg_val *= 100
         
@@ -383,18 +345,19 @@ with tabs[0]:
             engine = DataEngine(us_equivalent, selected_ticker)
             info = engine.yf_info
             
-            # Metrics verzamelen
+            # Metrics verzamelen via Yahoo (en fallback Finviz)
             metrics = {}
-            metrics['peg'] = engine.get_combined_metric('pegRatio', 'pegRatioTTM', None, 'peg')
-            metrics['pe'] = engine.get_combined_metric('trailingPE', 'peRatioTTM', 'pe', 'pe')
-            metrics['roe'] = engine.get_combined_metric('returnOnEquity', 'returnOnEquityTTM', None, None, True)
-            metrics['de'] = engine.get_combined_metric('debtToEquity', 'debtEquityRatioTTM')
-            metrics['cr'] = engine.get_combined_metric('currentRatio', 'currentRatioTTM')
-            metrics['pb'] = engine.get_combined_metric('priceToBook', 'priceToBookRatioTTM')
-            metrics['margin'] = engine.get_combined_metric('profitMargins', 'netProfitMarginTTM', None, None, True)
-            metrics['eps'] = engine.get_combined_metric('trailingEps', 'netIncomePerShareTTM', 'eps', 'eps')
-            # Hier voegen we de specifieke parameter toe voor Dividend:
-            metrics['div'] = engine.get_combined_metric('dividendYield', 'dividendYielTTM', None, None, True, is_dividend=True)
+            metrics['peg'] = engine.get_combined_metric('pegRatio', 'peg')
+            metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe')
+            metrics['roe'] = engine.get_combined_metric('returnOnEquity', None, is_percent=True)
+            # Debt/Equity met specifieke correctie vlag
+            metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
+            metrics['cr'] = engine.get_combined_metric('currentRatio', None)
+            metrics['pb'] = engine.get_combined_metric('priceToBook', None)
+            metrics['margin'] = engine.get_combined_metric('profitMargins', None, is_percent=True)
+            metrics['eps'] = engine.get_combined_metric('trailingEps', 'eps')
+            # Dividend met specifieke correctie vlag
+            metrics['div'] = engine.get_combined_metric('dividendYield', None, is_percent=True, is_dividend=True)
             
             # Prijzen & Valuta
             curr_sym = info.get('currencySymbol', '€')

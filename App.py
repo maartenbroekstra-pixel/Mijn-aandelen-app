@@ -190,14 +190,15 @@ class DataEngine:
         if not FMP_KEY: return
         try:
             # Ratios Endpoint
+            # LET OP: Headers verwijderd voor FMP, want FMP is een officiële API en kan headers soms blokkeren.
             url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{self.ticker}?apikey={FMP_KEY}"
-            r = requests.get(url_ratios, headers=HEADERS, timeout=3).json()
+            r = requests.get(url_ratios, timeout=3).json()
             if isinstance(r, list) and r: 
                 self.fmp_ratios = r[0]
 
             # Quote Endpoint (voor extra realtime data)
             url_quote = f"https://financialmodelingprep.com/api/v3/quote/{self.ticker}?apikey={FMP_KEY}"
-            q = requests.get(url_quote, headers=HEADERS, timeout=3).json()
+            q = requests.get(url_quote, timeout=3).json()
             if isinstance(q, list) and q: 
                 self.fmp_quote = q[0]
         except Exception as e:
@@ -209,7 +210,7 @@ class DataEngine:
         if "." not in self.ticker:
             self.finviz_data = get_finviz_data(self.ticker)
 
-    def get_combined_metric(self, key_yf, key_fmp_ratio, key_fmp_quote=None, key_finviz=None, is_percent=False):
+    def get_combined_metric(self, key_yf, key_fmp_ratio, key_fmp_quote=None, key_finviz=None, is_percent=False, is_dividend=False):
         """
         Combineert datapunten van Yahoo, FMP en Finviz.
         Berekent het gemiddelde als er meerdere bronnen zijn.
@@ -245,14 +246,16 @@ class DataEngine:
         
         avg_val = sum(values) / len(values)
         
-        # Percentage correctie (ROBUUST)
-        # Als we een percentage verwachten (ROE, Marge, Dividend):
-        # Als de absolute waarde <= 1.0 is (bv 0.34 of -0.05), gaan we ervan uit dat het een decimale fractie is.
-        # Dan vermenigvuldigen we met 100 (0.34 wordt 34%).
-        # Als de waarde groter is dan 1 (bv 15.5), laten we het staan.
+        # Percentage correctie
         if is_percent:
-            if abs(avg_val) <= 1.0 and avg_val != 0:
-                avg_val *= 100
+            if is_dividend:
+                # Speciale logica voor Dividend: < 0.6 betekent waarschijnlijk factor (0.05 = 5%), dus * 100
+                if avg_val < 0.6:
+                    avg_val *= 100
+            else:
+                # Standaard logica voor andere percentages (ROE, Margin): < 1.0 betekent factor
+                if abs(avg_val) <= 1.0 and avg_val != 0:
+                    avg_val *= 100
         
         source_str = " & ".join(sources)
         return avg_val, source_str
@@ -378,7 +381,8 @@ with tabs[0]:
             metrics['pb'] = engine.get_combined_metric('priceToBook', 'priceToBookRatioTTM')
             metrics['margin'] = engine.get_combined_metric('profitMargins', 'netProfitMarginTTM', None, None, True)
             metrics['eps'] = engine.get_combined_metric('trailingEps', 'netIncomePerShareTTM', 'eps', 'eps')
-            metrics['div'] = engine.get_combined_metric('dividendYield', 'dividendYielTTM', None, None, True)
+            # Hier voegen we de specifieke parameter toe voor Dividend:
+            metrics['div'] = engine.get_combined_metric('dividendYield', 'dividendYielTTM', None, None, True, is_dividend=True)
             
             # Prijzen & Valuta
             curr_sym = info.get('currencySymbol', '€')

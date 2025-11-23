@@ -635,8 +635,8 @@ with tabs[1]:
             "Winst/Verlies": st.column_config.NumberColumn("Winst (EUR)", format="€ %.2f", disabled=True), # Kleurt niet automatisch, maar crasht ook niet
             "Div/Jaar": st.column_config.NumberColumn("Div/Jaar (EUR)", format="€ %.2f", disabled=True),
             "Sector": st.column_config.TextColumn(disabled=True),
-            "Valuta": st.column_config.TextColumn(disabled=True),
-            "_currency_code": st.column_config.Column(hidden=True) # Verbergen
+            "Valuta": st.column_config.TextColumn(disabled=True)
+            # FOUTIEVE REGEL VERWIJDERD: _currency_code
         }
 
         # De Editor

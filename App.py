@@ -64,6 +64,7 @@ def smart_normalize(val):
     if val is None: return None
     try:
         f = float(val)
+        # Algemene check voor percentages die als geheel getal komen (bijv 15.5 ipv 0.155)
         if f > 0.8: return f / 100.0 
         return f
     except: return None
@@ -80,17 +81,12 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 # --- FMP API ---
 @st.cache_data(ttl=3600)
 def get_fmp_data(ticker, api_key):
-    """
-    Aangepast: Gebruikt 'annual' data ipv 'ttm'.
-    TTM is vaak betaald, annual is gratis.
-    """
-    clean_key = api_key.strip() # Spaties verwijderen
+    clean_key = api_key.strip() 
     if not clean_key: return {}, "Geen Key"
     
     data = {}
     try:
-        # Endpoint 1: Ratios (ANNUAL - Gratis)
-        # We halen de lijst op en pakken de eerste (meest recente jaar)
+        # Endpoint 1: Ratios (ANNUAL)
         url = f"https://financialmodelingprep.com/api/v3/ratios/{ticker}?period=annual&limit=1&apikey={clean_key}"
         r = requests.get(url, timeout=5)
         
@@ -98,7 +94,6 @@ def get_fmp_data(ticker, api_key):
             js = r.json()
             if isinstance(js, list) and len(js) > 0:
                 d = js[0]
-                # Let op: keys heten hier iets anders dan bij TTM endpoint (zonder TTM suffix)
                 data['peg'] = d.get('pegRatio')
                 data['pe'] = d.get('priceEarningsRatio')
                 data['pb'] = d.get('priceToBookRatio')
@@ -108,7 +103,7 @@ def get_fmp_data(ticker, api_key):
                 data['profit_margin'] = smart_normalize(d.get('netProfitMargin'))
                 data['div_yield'] = smart_normalize(d.get('dividendYield'))
             else:
-                # Als Annual leeg is, probeer toch TTM (sommige tickers hebben dit wel gratis)
+                # Fallback TTM
                 url_ttm = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{ticker}?apikey={clean_key}"
                 r_ttm = requests.get(url_ttm, timeout=3)
                 if r_ttm.status_code == 200:
@@ -117,12 +112,11 @@ def get_fmp_data(ticker, api_key):
                          d = js_ttm[0]
                          data['peg'] = d.get('pegRatioTTM')
                          data['pe'] = d.get('priceEarningsRatioTTM')
-                         # ... (rest van TTM mapping, ingekort voor stabiliteit)
                 
                 if not data: return {}, f"FMP: Geen data voor {ticker}"
 
         elif r.status_code == 403:
-            return {}, "FMP: Invalid Key of Limiet bereikt (Of account nog niet actief)"
+            return {}, "FMP: Invalid Key of Limiet bereikt"
         
         # 2. Quote Endpoint (EPS)
         url2 = f"https://financialmodelingprep.com/api/v3/quote/{ticker}?apikey={clean_key}"
@@ -141,11 +135,9 @@ def get_fmp_data(ticker, api_key):
 
 # --- COMBINEREN ---
 def get_combined_data(ticker, us_ticker, yf_info, fmp_key):
-    # 1. FMP (US Ticker is cruciaal voor gratis accounts!)
     fmp_target = us_ticker if us_ticker else ticker
     fmp_data, fmp_status = get_fmp_data(fmp_target, fmp_key)
     
-    # 2. Yahoo
     yahoo_data = {
         'peg': safe_get(yf_info, 'pegRatio'),
         'fwd_pe': safe_get(yf_info, 'forwardPE'),
@@ -162,7 +154,6 @@ def get_combined_data(ticker, us_ticker, yf_info, fmp_key):
     
     if yahoo_data['de'] and yahoo_data['de'] > 10: yahoo_data['de'] /= 100
 
-    # 3. Aggregeren
     keys = ['peg', 'fwd_pe', 'pb', 'roe', 'de', 'cr', 'profit_margin', 'div_yield', 'target', 'eps']
     final = {}
     sources = {}
@@ -282,7 +273,9 @@ with tabs[0]:
             st.markdown("---")
             tick = yf.Ticker(sel)
             info = tick.info
-            hist = tick.history(period="1y")
+            
+            # --- AANPASSING 1: 5 JAAR GRAFIEK ---
+            hist = tick.history(period="5y")
             
             if hist.empty: st.error("Geen koersdata.")
             else:
@@ -352,6 +345,12 @@ with tabs[0]:
                 
                 for i, (k, l) in enumerate(zip(ks, ls)):
                     v = data.get(k)
+                    
+                    # --- AANPASSING 2: YIELD DISPLAY FIX ---
+                    # Als yield > 0.5 is (dus 50%), is het waarschijnlijk ruwe data die nog door 100 moet.
+                    if k == 'div_yield' and v is not None and v > 0.5:
+                        v = v / 100.0
+
                     clr = get_c(k, v)
                     disp = "-"
                     if v is not None:
@@ -365,7 +364,31 @@ with tabs[0]:
                 with st.expander("🛠️ Debug (Yahoo vs FMP)"):
                     st.json(debug)
 
+                st.subheader(f"Koersverloop (5 Jaar)")
                 st.plotly_chart(px.line(hist, y='Close'))
+
+                # --- AANPASSING 3: NIEUWS & YOUTUBE ---
+                st.markdown("---")
+                col_news, col_video = st.columns(2)
+                
+                with col_news:
+                    st.subheader("Laatste Nieuws")
+                    # Link naar Google News search
+                    news_url = f"https://news.google.com/search?q={sel}+stock"
+                    st.markdown(f"📰 [Klik hier voor nieuws over **{sel}** op Google News]({news_url})")
+                    
+                    # Optioneel ook Yahoo Finance news link
+                    yf_news = f"https://finance.yahoo.com/quote/{sel}/news"
+                    st.markdown(f"📈 [Yahoo Finance nieuws over **{sel}**]({yf_news})")
+
+                with col_video:
+                    st.subheader("Video Analyse")
+                    # Link naar YouTube search
+                    yt_url = f"https://www.youtube.com/results?search_query={sel}+stock+analysis"
+                    st.markdown(f"📺 [Zoek video analyses over **{sel}** op YouTube]({yt_url})")
+                    
+                    # Embedded video speler (zoekt automatisch de ticker)
+                    st.video(f"https://www.youtube.com/embed?listType=search&list={sel}+stock+analysis")
 
         except Exception as e: st.error(f"Fout: {e}")
 

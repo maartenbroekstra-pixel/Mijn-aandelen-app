@@ -135,7 +135,6 @@ class DataEngine:
 
     def fetch_fmp(self):
         try:
-            # FIX 2: Headers toegevoegd aan requests
             url_ratios = f"https://financialmodelingprep.com/api/v3/ratios-ttm/{self.ticker}?apikey={FMP_KEY}"
             r = requests.get(url_ratios, headers=HEADERS, timeout=3).json()
             if isinstance(r, list) and r: self.fmp_ratios = r[0]
@@ -168,12 +167,14 @@ class DataEngine:
         
         avg_val = sum(values) / len(values)
         
-        # FIX 4: Betere percentage detectie
+        # CORRECTIE: Betere percentage detectie
+        # Drempel verlaagd naar 0.25. 
+        # Voorbeeld: 0.0077 (0.77%) < 0.25 -> x100 -> 0.77 (Wordt getoond als 0.77%)
+        # Voorbeeld: 0.77 (FMP geeft soms 0.77 terug voor 0.77%) > 0.25 -> Blijft 0.77 (Wordt getoond als 0.77%)
+        # Voorbeeld: 0.05 (5%) < 0.25 -> x100 -> 5.0 (Wordt getoond als 5.00%)
         if is_percent:
-            # Als het getal heel klein is (bv 0.0077) -> x100 -> 0.77%
-            if avg_val < 0.90: 
+            if avg_val < 0.25: 
                 avg_val *= 100
-            # Als het getal normaal is (bv 5.5) -> blijft 5.5%
         
         return avg_val, " & ".join(sources)
 
@@ -209,7 +210,7 @@ def calculate_ai_score(data):
 # --- UI START ---
 st.sidebar.header("📂 Data Beheer")
 
-# FIX 5: Download & Upload functionaliteit hersteld
+# FIX: Download & Upload functionaliteit hersteld
 json_data = json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']})
 st.sidebar.download_button("⬇️ Download Backup", json_data, "aandelen_backup.json", "application/json")
 
@@ -217,7 +218,6 @@ uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
 if uploaded_file:
     try:
         d = json.load(uploaded_file)
-        # Zorg dat zowel portfolio als wishlist geladen worden
         if 'p' in d: st.session_state['portfolio'] = d['p']
         if 'w' in d: st.session_state['wishlist'] = d['w']
         st.toast("Succesvol geladen!", icon="✅")
@@ -301,11 +301,12 @@ with tabs[0]:
             st.subheader("📊 Fundamentals")
             def m_col(label, key, good_cond, bad_cond, fmt="{:.2f}", is_pct=False):
                 val, src = d[key]
+                # FIX: Bron teruggezet in help
                 if val is None: return st.metric(label, "N/A", help=f"Bron: {src}")
                 
                 delta_val = "✅" if good_cond(val) else "⚠️" if bad_cond(val) else "⚪"
-                display = f"{val:.1f}%" if is_pct else fmt.format(val) # Toont nu netjes 0.7% als de waarde 0.7 is
-                st.metric(label, display, delta=delta_val, delta_color="off", help=f"Waarde: {val}\n{TOOLTIPS.get(key,'')}")
+                display = f"{val:.1f}%" if is_pct else fmt.format(val)
+                st.metric(label, display, delta=delta_val, delta_color="off", help=f"Waarde: {val}\nBron: {src}\n{TOOLTIPS.get(key,'')}")
 
             with st.container(border=True):
                 c1, c2, c3, c4 = st.columns(4)
@@ -333,7 +334,7 @@ with tabs[0]:
                 for n in get_google_news(info.get('shortName', sel)):
                     st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
 
-            # --- TOEVOEGEN (FIX 3: GEEN CALCULATOR MEER) ---
+            # --- TOEVOEGEN (FIX: CALCULATOR VERWIJDERD) ---
             st.divider()
             with st.popover("➕ Toevoegen aan Portfolio", use_container_width=True):
                 st.subheader("Positie Toevoegen")
@@ -359,52 +360,20 @@ with tabs[0]:
         except Exception as e: st.error(f"Fout: {e}")
 
 # ==================================================
-# 2. PORTFOLIO PRO
+# 2. PORTFOLIO PRO (GEINTEGREERDE EDITOR)
 # ==================================================
 with tabs[1]:
     if st.session_state['portfolio']:
-        st.markdown("### 🛠️ Portfolio Beheer")
+        st.markdown("### 📊 Mijn Portfolio")
         
-        # EDIT MODE
-        raw_df = pd.DataFrame(st.session_state['portfolio'])
-        edit_df_view = raw_df[['ticker', 'amount', 'avg_price', 'currency']].rename(
-            columns={'ticker': 'Aandeel', 'amount': 'Aantal', 'avg_price': 'GAK', 'currency': 'Valuta'}
-        )
-        
-        edited_df = st.data_editor(
-            edit_df_view, 
-            column_config={
-                "Aandeel": st.column_config.TextColumn(disabled=True),
-                "Valuta": st.column_config.TextColumn(disabled=True),
-                "Aantal": st.column_config.NumberColumn(min_value=0.0001, required=True),
-                "GAK": st.column_config.NumberColumn(min_value=0.0, required=True, format="%.2f")
-            },
-            num_rows="dynamic",
-            use_container_width=True,
-            key="portfolio_editor"
-        )
-        
-        updated_portfolio = []
-        for idx, row in edited_df.iterrows():
-            original_item = st.session_state['portfolio'][idx] if idx < len(st.session_state['portfolio']) else {}
-            updated_portfolio.append({
-                'ticker': row['Aandeel'],
-                'amount': row['Aantal'],
-                'avg_price': row['GAK'],
-                'currency': row['Valuta'],
-                'symbol': original_item.get('symbol', '€')
-            })
-        st.session_state['portfolio'] = updated_portfolio
-
-        # LIVE CALCULATIES
+        # We bouwen de data voor de tabel EERST
         p_data = []
         tot_val_eur = 0
         tot_cost_eur = 0
         tot_div_eur = 0
         sectors = {}
         
-        st.markdown("---")
-        
+        # Batch data ophalen
         for i, item in enumerate(st.session_state['portfolio']):
             t = item['ticker']
             curr = item.get('currency', 'EUR')
@@ -442,16 +411,19 @@ with tabs[1]:
             tot_div_eur += div_eur
             sectors[sec] = sectors.get(sec, 0) + val_eur
 
+            # Dit wordt de bron voor de editor
             p_data.append({
                 "Ticker": t,
                 "Aantal": item['amount'],
-                "Prijs": live_price,
-                "GAK": item['avg_price'],
-                "Waarde": val_native,
-                "Winst": prof_native * rate_to_eur, 
+                "GAK": item['avg_price'], # Bewerkbaar
+                "Prijs": live_price, # Read-only
+                "Waarde": val_native, # Read-only
+                "Winst": prof_native * rate_to_eur, # Verborgen voor kleur
+                "Winst/Verlies": prof_native * rate_to_eur, # Zichtbaar (in EUR voor overzichtelijkheid)
                 "Div/Jaar": div_eur,
                 "Sector": sec,
-                "Valuta": sym
+                "Valuta": sym,
+                "_currency_code": curr # Verborgen helper kolom
             })
         
         # DASHBOARD
@@ -463,6 +435,8 @@ with tabs[1]:
         k3.metric("Geschat Dividend/Jaar", f"€ {tot_div_eur:,.2f}", delta="Passief Inkomen")
         yield_tot = (tot_div_eur / tot_val_eur * 100) if tot_val_eur else 0
         k4.metric("Portfolio Yield", f"{yield_tot:.2f}%")
+        
+        st.markdown("---")
         
         # VISUALS
         col_v1, col_v2 = st.columns(2)
@@ -478,23 +452,46 @@ with tabs[1]:
                 fig_bar = px.bar(df_chart, x='Ticker', y='Div/Jaar', color='Sector', title="Dividend per Aandeel (€)")
                 st.plotly_chart(fig_bar, use_container_width=True)
 
-        # TABEL - FIX 1: Gebruik column_config ipv style.applymap
-        st.subheader("Detail Overzicht")
-        df_display = pd.DataFrame(p_data)
+        # TABEL MET EDIT FUNCTIE
+        st.subheader("Detail Overzicht & Bewerken")
+        df_for_editor = pd.DataFrame(p_data)
         
-        st.dataframe(
-            df_display,
-            column_order=("Ticker", "Aantal", "Prijs", "GAK", "Waarde", "Winst", "Div/Jaar", "Sector"),
+        # We gebruiken data_editor zodat je IN de lijst kunt aanpassen
+        edited_df = st.data_editor(
+            df_for_editor,
+            column_order=("Ticker", "Aantal", "GAK", "Prijs", "Waarde", "Winst/Verlies", "Div/Jaar", "Sector", "Valuta"),
             column_config={
-                "Prijs": st.column_config.NumberColumn(format="%.2f"),
-                "GAK": st.column_config.NumberColumn(format="%.2f"),
-                "Waarde": st.column_config.NumberColumn(format="%.2f"),
-                "Div/Jaar": st.column_config.NumberColumn(format="€ %.2f"),
-                "Winst": st.column_config.NumberColumn(format="€ %.2f") # Kleuren doet Streamlit automatisch bij winst/verlies in NumberColumn niet zo fel, maar dit voorkomt de crash.
+                "Ticker": st.column_config.TextColumn(disabled=True),
+                "Aantal": st.column_config.NumberColumn(min_value=0.0001, required=True, step=1.0),
+                "GAK": st.column_config.NumberColumn(label="GAK (Origineel)", min_value=0.0, required=True, format="%.2f"),
+                "Prijs": st.column_config.NumberColumn(format="%.2f", disabled=True),
+                "Waarde": st.column_config.NumberColumn(format="%.2f", disabled=True),
+                "Div/Jaar": st.column_config.NumberColumn(format="€ %.2f", disabled=True),
+                "Winst/Verlies": st.column_config.NumberColumn(format="€ %.2f", disabled=True),
+                "Sector": st.column_config.TextColumn(disabled=True),
+                "Valuta": st.column_config.TextColumn(disabled=True),
             },
             hide_index=True,
-            use_container_width=True
+            use_container_width=True,
+            key="main_portfolio_editor"
         )
+        
+        # State Update Logic: Als er wijzigingen zijn in edited_df, update st.session_state
+        # We vergelijken de data niet per se, we overschrijven de state gewoon met de nieuwe waarden
+        # uit de editor, waarbij we de verborgen currency codes gebruiken.
+        if not df_for_editor.equals(edited_df):
+            new_portfolio_state = []
+            for idx, row in edited_df.iterrows():
+                new_portfolio_state.append({
+                    'ticker': row['Ticker'],
+                    'amount': row['Aantal'],
+                    'avg_price': row['GAK'],
+                    'currency': row['_currency_code'],
+                    'symbol': row['Valuta']
+                })
+            st.session_state['portfolio'] = new_portfolio_state
+            # Force rerun om totalen direct bij te werken na edit
+            st.rerun()
 
         # COMPOUND CALCULATOR
         st.markdown("---")
@@ -534,12 +531,12 @@ with tabs[1]:
         st.info("Portfolio is leeg. Voeg aandelen toe via de Analyse tab.")
 
 # ==================================================
-# 3. WISHLIST (FIX 6: COMPACTE LIJST)
+# 3. WISHLIST
 # ==================================================
 with tabs[2]:
     st.subheader("Mijn Wishlist")
     if st.session_state['wishlist']:
-        # Simpele loop voor lijstweergave
+        # Simpele loop voor lijstweergave zonder poespas
         for i, w in enumerate(st.session_state['wishlist']):
             t = w['ticker']
             try:

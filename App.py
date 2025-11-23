@@ -316,12 +316,16 @@ st.sidebar.download_button(
 
 # Upload JSON
 uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
-if uploaded_file:
+# We gebruiken een extra knop om de upload te bevestigen, anders overschrijft
+# de upload-widget de state bij elke refresh (dus ook als je een aandeel toevoegt).
+if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
     try:
         loaded_data = json.load(uploaded_file)
         if 'p' in loaded_data: st.session_state['portfolio'] = loaded_data['p']
         if 'w' in loaded_data: st.session_state['wishlist'] = loaded_data['w']
-        st.toast("Data succesvol geladen!", icon="✅")
+        st.toast("Data succesvol geladen! Voeg nu gerust nieuwe aandelen toe.", icon="✅")
+        # Optioneel: st.rerun() om direct de tabellen te updaten, 
+        # maar Streamlit doet dit meestal al na een knopdruk.
     except Exception as e:
         st.error(f"Fout bij laden bestand: {e}")
 
@@ -636,7 +640,6 @@ with tabs[1]:
             "Div/Jaar": st.column_config.NumberColumn("Div/Jaar (EUR)", format="€ %.2f", disabled=True),
             "Sector": st.column_config.TextColumn(disabled=True),
             "Valuta": st.column_config.TextColumn(disabled=True)
-            # FOUTIEVE REGEL VERWIJDERD: _currency_code
         }
 
         # De Editor

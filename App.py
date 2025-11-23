@@ -2,7 +2,6 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import requests
 import json
 import re
@@ -51,6 +50,9 @@ if 'portfolio' not in st.session_state:
 if 'wishlist' not in st.session_state: 
     st.session_state['wishlist'] = []
 
+if 'search_results' not in st.session_state:
+    st.session_state['search_results'] = []
+
 # ==================================================
 # 3. HELPER FUNCTIES
 # ==================================================
@@ -63,7 +65,6 @@ def get_finviz_data(ticker):
         r = requests.get(url, headers=HEADERS, timeout=4)
         if r.status_code == 200:
             def parse(label):
-                # Regex aangepast om flexibeler te zijn met spaties en tekens
                 m = re.search(rf'>{label}</td>.*?<b>\s*([\d\.-]+)\s*</b>', r.text, re.DOTALL)
                 if m and m.group(1) != '-':
                     return float(m.group(1))
@@ -76,7 +77,6 @@ def get_finviz_data(ticker):
             d['de'] = parse('Debt/Eq')
             d['roe'] = parse('ROE') 
             d['margin'] = parse('Profit Margin')
-            # Nieuw: Dividend ophalen voor fallback
             d['div'] = parse('Dividend %')
     except Exception:
         pass
@@ -171,7 +171,7 @@ class DataEngine:
         # Percentage Correctie
         if is_percent:
             if is_dividend:
-                # AANPASSING PUNT 3: Geen vermenigvuldiging met 100, pak de ruwe waarde.
+                # GEEN vermenigvuldiging met 100 voor dividend
                 return val
             else:
                 # Andere percentages (ROE, Margin): < 1.0 is factor, > 1.0 is al procent
@@ -216,7 +216,7 @@ class DataEngine:
             valid_values.append(norm_yf)
             sources.append("Yahoo")
         
-        # AANPASSING PUNT 1 & 2: Als we niet middelen en Yahoo is gevonden, stop dan hier.
+        # Als we NIET middelen en we hebben Yahoo, stop dan hier
         if not use_average and valid_values:
             return valid_values[0], sources[0]
 
@@ -231,7 +231,7 @@ class DataEngine:
         if not valid_values:
             return None, "N/A"
         
-        # Als we niet middelen (en Yahoo was leeg), pakken we Finviz (de eerste in de lijst nu)
+        # Als we niet middelen (en Yahoo was leeg), pakken we Finviz
         if not use_average:
             return valid_values[0], sources[0]
         
@@ -248,7 +248,7 @@ def calculate_ai_score(data):
     score = 5.0
     reasons = []
     
-    # 1. Winstgevendheid (Cruciaal)
+    # 1. Winstgevendheid
     eps_val, _ = data['eps']
     if eps_val is not None:
         if eps_val > 0:
@@ -308,12 +308,8 @@ def calculate_ai_score(data):
         if roe_val > 15:
             score += 0.5
     
-    # 5. Dividend
+    # 5. Dividend (Logica aangepast voor decimalen vs procenten)
     div_val, _ = data['div']
-    # Let op: drempelwaardes moeten misschien aangepast worden afhankelijk van de schaal (0.03 vs 3.0)
-    # Gezien de instructie "niet *100", kan dit nu kleine decimalen zijn (bijv 0.05).
-    # Als div_val < 1.0 is (waarschijnlijk decimaal), dan is > 0.03 goed.
-    # Als div_val > 1.0 is (waarschijnlijk procent), dan is > 3.0 goed.
     if div_val is not None:
         is_decimal = div_val < 1.0
         threshold = 0.025 if is_decimal else 2.5
@@ -373,21 +369,34 @@ tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️ Wishlist", "🇳�
 # TAB 1: ANALYSE
 # --------------------------------------------------
 with tabs[0]:
+    # Zoekfunctie Logica met Session State om reset te voorkomen
+    def run_search():
+        query = st.session_state.search_main
+        if query:
+            if "." in query and " " not in query:
+                st.session_state['search_results'] = [query]
+            else:
+                st.session_state['search_results'] = search_yahoo_strict(query)
+        else:
+            st.session_state['search_results'] = []
+
     col_search, col_period = st.columns([3, 1])
     with col_search:
-        current_query = st.session_state.get('search_query', "")
-        search_input = st.text_input("Zoek aandeel (Naam of Ticker):", value=current_query, key="search_main")
+        search_input = st.text_input(
+            "Zoek aandeel (Typ en druk op Enter):", 
+            key="search_main", 
+            on_change=run_search
+        )
         
         selected_ticker = None
-        if search_input:
-            if "." in search_input and " " not in search_input: 
-                selected_ticker = search_input 
-            else:
-                results = search_yahoo_strict(search_input)
-                if results:
-                    selected_ticker = st.selectbox("Zoekresultaten:", results).split(" | ")[0]
-                else:
-                    selected_ticker = search_input.upper()
+        
+        if st.session_state['search_results']:
+            selection = st.selectbox("Zoekresultaten:", st.session_state['search_results'])
+            if selection:
+                selected_ticker = selection.split(" | ")[0]
+        elif search_input:
+            if "." in search_input:
+                selected_ticker = search_input
     
     with col_period:
         chart_period = st.selectbox("Grafiek Periode", ["1mo", "6mo", "1y", "5y", "max"], index=2)
@@ -401,13 +410,12 @@ with tabs[0]:
             metrics = {}
             metrics['peg'] = engine.get_robust_peg()
             
-            # AANPASSING PUNT 1: PE Priority (Yahoo > Finviz, geen average)
+            # P/E: Yahoo > Finviz (Geen Avg)
             metrics['pe'] = engine.get_combined_metric('trailingPE', 'pe', use_average=False)
             
-            # AANPASSING PUNT 2: Dividend Priority (Yahoo > Finviz, geen average, finviz key toegevoegd)
+            # Dividend: Yahoo > Finviz (Geen Avg), Geen *100
             metrics['div'] = engine.get_combined_metric('dividendYield', 'div', is_percent=True, is_dividend=True, use_average=False)
             
-            # Overige metrics
             metrics['roe'] = engine.get_combined_metric('returnOnEquity', 'roe', is_percent=True)
             metrics['de'] = engine.get_combined_metric('debtToEquity', 'de', is_debt_equity=True)
             metrics['cr'] = engine.get_combined_metric('currentRatio', None)
@@ -483,8 +491,7 @@ with tabs[0]:
                 with c1: display_metric("P/E Ratio", 'pe', lambda x: x<20, lambda x: x>35)
                 with c2: display_metric("PEG Ratio", 'peg', lambda x: x<1.5, lambda x: x>2.5)
                 with c3: display_metric("EPS", 'eps', lambda x: x>0, lambda x: x<0)
-                # Bij Dividend checken we nu of de waarde (die klein kan zijn door geen x100) groter is dan een drempel
-                # We passen de lambda's aan om zowel decimalen (0.03) als procenten (3.0) logisch te behandelen voor de kleurcode
+                # Dividend check: ondersteunt zowel decimaal (0.03) als procent (3.0)
                 with c4: display_metric("Dividend", 'div', lambda x: x>3 or (x<1 and x>0.03), lambda x: x<1 and x>0.01, is_pct=True)
                 
                 c5, c6, c7, c8 = st.columns(4)

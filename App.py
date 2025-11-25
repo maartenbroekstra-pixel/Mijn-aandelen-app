@@ -15,11 +15,19 @@ import time
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# Debug: Toon versie in sidebar
+# Debug: Toon versie
 st.sidebar.caption(f"Streamlit versie: {st.__version__}")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
+
+# Headers specifiek voor Nasdaq API om blokkades te voorkomen
+NASDAQ_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Origin': 'https://www.nasdaq.com',
+    'Referer': 'https://www.nasdaq.com/'
 }
 
 EU_TO_US_MAP = {
@@ -110,9 +118,74 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     except Exception:
         return 1.0
 
+# NIEUWE FUNCTIE: NASDAQ EARNINGS
+@st.cache_data(ttl=3600)
+def get_nasdaq_earnings(ticker):
+    """
+    Haalt earnings surprise data direct van de Nasdaq API.
+    Werkt het beste voor US tickers.
+    """
+    # Map EU ticker naar US (bijv HEIA.AS -> HEINY)
+    us_ticker = EU_TO_US_MAP.get(ticker, ticker)
+    # Verwijder eventuele suffixen voor de API call (AAPL.US -> AAPL)
+    clean_ticker = us_ticker.split('.')[0]
+    
+    url = f"https://api.nasdaq.com/api/company/{clean_ticker}/earnings-surprise"
+    
+    try:
+        r = requests.get(url, headers=NASDAQ_HEADERS, timeout=5)
+        data = r.json()
+        
+        if data.get('data') and data['data'].get('earningsSurpriseTable'):
+            rows = data['data']['earningsSurpriseTable'].get('rows', [])
+            history = []
+            
+            for row in rows[:4]: # Pak de laatste 4
+                try:
+                    # Datum parsing
+                    date_str = row.get('dateReported')
+                    if not date_str: continue
+                    
+                    # EPS parsing (verwijder $ teken)
+                    eps_rep = row.get('eps')
+                    eps_est = row.get('consensusForecast')
+                    
+                    # Nasdaq geeft soms "N/A"
+                    if eps_rep == "N/A" or eps_est == "N/A": continue
+                    
+                    val_rep = float(str(eps_rep).replace('$', '').replace(',', ''))
+                    val_est = float(str(eps_est).replace('$', '').replace(',', ''))
+                    
+                    history.append({
+                        'date': date_str,
+                        'reported': val_rep,
+                        'estimate': val_est,
+                        # Percentage zelf berekenen voor consistentie
+                        'surprise': ((val_rep - val_est) / abs(val_est) * 100) if val_est != 0 else 0
+                    })
+                except:
+                    continue
+            
+            # Formatteer return object
+            if history:
+                # Sorteer van oud naar nieuw voor de grafiek
+                history.reverse()
+                last = history[-1]
+                
+                return {
+                    'earnings_history': history,
+                    'last_surprise': {
+                        'date': last['date'],
+                        'surprise_pct': last['surprise']
+                    }
+                }
+    except Exception:
+        pass
+    return None
+
 @st.cache_data(ttl=3600)
 def get_extended_portfolio_data(ticker):
-    # Vertraging om Yahoo 'Too Many Requests' te voorkomen
+    # Vertraging tegen blokkades
     time.sleep(0.3)
     
     try:
@@ -120,18 +193,14 @@ def get_extended_portfolio_data(ticker):
         fast_info = tk.fast_info 
         info = tk.info
         
-        # Check validiteit
+        # Validatie
         if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
              if fast_info and fast_info.last_price:
                  current_price = fast_info.last_price
                  previous_close = fast_info.previous_close
-                 # Fake info object
                  info = {
-                     'quoteType': 'EQUITY', 
-                     'sector': 'Onbekend', 
-                     'currencySymbol': '?', 
-                     'shortName': ticker,
-                     'longName': ticker
+                     'quoteType': 'EQUITY', 'sector': 'Onbekend', 
+                     'currencySymbol': '?', 'shortName': ticker, 'longName': ticker
                  }
              else:
                  return None 
@@ -140,80 +209,57 @@ def get_extended_portfolio_data(ticker):
         if 'ETF' in q_type: q_type = 'ETF'
         else: q_type = 'Aandeel'
             
-        # Earnings Data
+        # 2. Earnings: Eerst Nasdaq proberen, anders Yahoo fallback
+        earnings_data = get_nasdaq_earnings(ticker)
+        
         earnings_surprise = None
         earnings_history_list = []
-        try:
-            us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-            earning_tk = yf.Ticker(us_ticker)
-            
-            dates = earning_tk.earnings_dates
-            if dates is not None and not dates.empty:
-                if dates.index.tz is not None:
-                    dates.index = dates.index.tz_localize(None)
-                
-                now = datetime.now()
-                past_dates = dates[dates.index < now].sort_index(ascending=False)
-                valid_history = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
-                
-                if not valid_history.empty:
-                    for date, row in valid_history.iterrows():
-                         earnings_history_list.append({
-                             'date': date.strftime('%Y-%m-%d'),
-                             'reported': row['Reported EPS'],
-                             'estimate': row['EPS Estimate'],
-                             'surprise': row['Surprise(%)'] if 'Surprise(%)' in row else 0
-                         })
-                    earnings_history_list.reverse()
+        
+        if earnings_data:
+            earnings_history_list = earnings_data['earnings_history']
+            earnings_surprise = earnings_data['last_surprise']
+        else:
+            # Fallback: Yahoo Earnings (zoals eerder)
+            try:
+                us_ticker = EU_TO_US_MAP.get(ticker, ticker)
+                earning_tk = yf.Ticker(us_ticker)
+                dates = earning_tk.earnings_dates
+                if dates is not None and not dates.empty:
+                    if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
+                    now = datetime.now()
+                    past_dates = dates[dates.index < now].sort_index(ascending=False)
+                    valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
+                    if not valid.empty:
+                        for date, row in valid.iterrows():
+                             earnings_history_list.append({
+                                 'date': date.strftime('%Y-%m-%d'),
+                                 'reported': row['Reported EPS'],
+                                 'estimate': row['EPS Estimate'],
+                                 'surprise': row['Surprise(%)']
+                             })
+                        earnings_history_list.reverse()
+                        
+                        last = valid.iloc[0]
+                        est = last['EPS Estimate']
+                        rep = last['Reported EPS']
+                        surp = ((rep - est)/abs(est)*100) if est!=0 else 0
+                        earnings_surprise = {'date': valid.index[0], 'surprise_pct': surp}
+            except: pass
 
-                    last_report = valid_history.iloc[0]
-                    reported = last_report.get('Reported EPS')
-                    estimate = last_report.get('EPS Estimate')
-                    earnings_date = valid_history.index[0]
-                    
-                    if pd.notnull(reported) and pd.notnull(estimate):
-                        val_est = float(estimate)
-                        val_rep = float(reported)
-                        if val_est != 0:
-                            surp_pct = ((val_rep - val_est) / abs(val_est)) * 100
-                        else:
-                            surp_pct = 0
-                        earnings_surprise = {
-                            'date': earnings_date,
-                            'reported': val_rep,
-                            'estimate': val_est,
-                            'surprise_pct': surp_pct
-                        }
-        except Exception:
-            pass
-
-        # Dividend
+        # 3. Dividend
         dividend_months = []
         try:
             hist = tk.dividends
             if not hist.empty:
-                if hist.index.tz is not None:
-                    hist.index = hist.index.tz_localize(None)
+                if hist.index.tz is not None: hist.index = hist.index.tz_localize(None)
                 last_year = datetime.now() - timedelta(days=365)
                 recent_divs = hist[hist.index > last_year]
                 for date, amount in recent_divs.items():
                     dividend_months.append({'month': date.month, 'amount': amount})
-        except Exception:
-            pass
+        except: pass
 
-        # YTD
-        ytd_start_price = None
-        current_year = datetime.now().year
-        try:
-            start_of_year = f"{current_year}-01-01"
-            hist_ytd = tk.history(start=start_of_year, interval="1d")
-            if not hist_ytd.empty:
-                ytd_start_price = hist_ytd['Close'].iloc[0]
-        except:
-            pass
-
+        current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
         previous_close = info.get('regularMarketPreviousClose')
-        current_price = info.get('currentPrice') or previous_close
 
         if not current_price:
              try: current_price = tk.fast_info.last_price
@@ -227,7 +273,6 @@ def get_extended_portfolio_data(ticker):
             'sector': info.get('sector', 'ETF/Overig'),
             'live_price': current_price,
             'previous_close': previous_close,
-            'ytd_start_price': ytd_start_price, 
             'currency_symbol': info.get('currencySymbol', '€'),
             'shortName': info.get('shortName', ticker),
             'longName': info.get('longName', ticker),
@@ -243,14 +288,10 @@ def search_yahoo_strict(query):
         r = requests.get(url, headers=HEADERS, timeout=3)
         data = r.json()
         results = []
-        raw_quotes = data.get('quotes', [])
-        for q in raw_quotes:
-            symbol = q.get('symbol')
-            name = q.get('shortname') or q.get('longname' ) or symbol
-            results.append(f"{symbol} | {name}")
+        for q in data.get('quotes', []):
+            results.append(f"{q.get('symbol')} | {q.get('shortname') or q.get('longname')}")
         return results
-    except Exception:
-        return []
+    except: return []
 
 def get_google_news(query):
     try:
@@ -260,15 +301,13 @@ def get_google_news(query):
         root = ET.fromstring(r.content)
         items = []
         for i in root.findall('./channel/item')[:3]:
-            pub_date = i.find('pubDate').text[:16]
             items.append({
                 "title": i.find('title').text,
                 "link": i.find('link').text,
-                "date": pub_date
+                "date": i.find('pubDate').text[:16]
             })
         return items
-    except Exception:
-        return []
+    except: return []
 
 @st.cache_data(ttl=3600)
 def get_youtube_video_id(query):
@@ -278,11 +317,10 @@ def get_youtube_video_id(query):
         r = requests.get(url, headers=HEADERS, timeout=5)
         vids = re.findall(r"watch\?v=(\S{11})", r.text)
         return vids[0] if vids else None
-    except Exception:
-        return None
+    except: return None
 
 # ==================================================
-# 4. DATA ENGINE CLASS (Voor Analyse Tab)
+# 4. DATA ENGINE
 # ==================================================
 class DataEngine:
     def __init__(self, ticker, original_ticker):
@@ -290,12 +328,7 @@ class DataEngine:
         self.original_ticker = original_ticker 
         self.yf_obj = yf.Ticker(original_ticker)
         self.yf_info = self.yf_obj.info
-        self.finviz_data = {}
-        self.fetch_finviz()
-
-    def fetch_finviz(self):
-        if "." not in self.ticker:
-            self.finviz_data = get_finviz_data(self.ticker)
+        self.finviz_data = get_finviz_data(self.ticker) if "." not in self.ticker else {}
 
     def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity, source_name):
         if val is None: return None
@@ -344,7 +377,7 @@ class DataEngine:
         return avg_val, source_str
 
 # ==================================================
-# 5. AI SCORE LOGICA
+# 5. AI SCORE
 # ==================================================
 def calculate_ai_score(data):
     score = 5.0
@@ -606,7 +639,7 @@ with tabs[1]:
         
         failed_tickers = []
         earnings_history_store = {}
-        ticker_details_map = {} # Mapping voor de dropdown
+        ticker_details_map = {} 
 
         progress_bar = st.progress(0, text="Portfolio data analyseren...")
         
@@ -616,7 +649,7 @@ with tabs[1]:
             
             ext_data = get_extended_portfolio_data(ticker)
             
-            # FIX: Fallback als data ophalen mislukt (Rate Limit)
+            # Fallback
             data_failed = False
             if ext_data is None:
                 data_failed = True
@@ -624,7 +657,6 @@ with tabs[1]:
                 ext_data = {
                     'live_price': 0, 
                     'previous_close': 0, 
-                    'ytd_start_price': 0,
                     'type': 'Onbekend', 
                     'sector': 'Fout', 
                     'currency_symbol': item.get('symbol', '?'),
@@ -634,7 +666,7 @@ with tabs[1]:
                     'dividend_history': []
                 }
 
-            # Fallbacks
+            # Data extractie
             live_price = ext_data.get('live_price', 0)
             if live_price is None: live_price = 0
             
@@ -662,13 +694,14 @@ with tabs[1]:
             total_cost_eur += cost_eur
             
             if not data_failed:
-                # Dag resultaat
+                # 1. Dag Resultaat: Verschil vandaag
                 if ext_data.get('previous_close'):
                     total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
-                # Jaar resultaat (YTD)
-                if ext_data.get('ytd_start_price'):
-                     total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
-
+                
+            # 2. Totaal Winst vs GAK (vervangt YTD 1 jan logica)
+            # Dit is de pure winst/verlies van het portfolio
+            # Omdat we geen datum hebben, is dit de beste "Performance" metriek.
+            
             # Dividend
             yearly_div_eur = 0
             if ext_data:
@@ -695,7 +728,7 @@ with tabs[1]:
                 stock_stats['cost'] += cost_eur
                 stock_stats['profit'] += profit_eur
 
-            # Earnings
+            # Earnings String
             earnings_str = "-"
             earnings_color = "black"
             if ext_data:
@@ -704,12 +737,11 @@ with tabs[1]:
                 
                 if ext_data.get('earnings'):
                     surp = ext_data['earnings']['surprise_pct']
-                    date_str = ext_data['earnings']['date'].strftime('%d-%m')
                     if surp > 0:
-                        earnings_str = f"Beat: +{surp:.1f}% ({date_str})"
+                        earnings_str = f"Beat: +{surp:.1f}%"
                         earnings_color = "green"
                     else:
-                        earnings_str = f"Miss: {surp:.1f}% ({date_str})"
+                        earnings_str = f"Miss: {surp:.1f}%"
                         earnings_color = "red"
             
             display_price = live_price
@@ -717,11 +749,9 @@ with tabs[1]:
                 display_price = 0.0
                 earnings_str = "⚠️ ERROR"
 
-            # Mapping opslaan voor de dropdown details
             ticker_details_map[ticker] = {
                 'shortName': short_name,
-                'longName': long_name,
-                'status': 'Error' if data_failed else 'OK'
+                'longName': long_name
             }
 
             portfolio_data.append({
@@ -747,7 +777,7 @@ with tabs[1]:
         progress_bar.empty()
         
         if failed_tickers:
-            st.warning(f"⚠️ Yahoo kon data niet ophalen voor: {', '.join(failed_tickers)}. Waarde tijdelijk op €0. Wacht even en herlaad.")
+            st.warning(f"⚠️ Yahoo kon data niet ophalen voor: {', '.join(failed_tickers)}. Waarde tijdelijk op €0.")
 
         # Sorteer op Totale Waarde
         portfolio_data.sort(key=lambda x: x["Waarde (€)"], reverse=True)
@@ -764,7 +794,8 @@ with tabs[1]:
             k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
             k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
             k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-            k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
+            # AANGEPAST: Dit toont nu pure winst vs GAK als 4e metric ipv YTD(Jan 1)
+            k4.metric("Totaal Winst (vs GAK)", f"€ {abs_profit:,.2f}", help="Huidige Waarde - Aankoopwaarde")
             k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
             k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
             
@@ -836,7 +867,6 @@ with tabs[1]:
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
             }
             
-            # STABIELE TABEL (Geen on_select, dus geen crash)
             edited_df = st.data_editor(
                 df_editor_source, 
                 column_config=column_settings, 
@@ -874,7 +904,6 @@ with tabs[1]:
             st.divider()
             st.subheader("🔎 Details per Aandeel")
             
-            # Lijst voor dropdown
             available_tickers = [item['Ticker'] for item in portfolio_data]
             
             if available_tickers:
@@ -889,6 +918,7 @@ with tabs[1]:
                     with d1:
                         if selected_ticker in earnings_history_store:
                             st.markdown(f"**Earnings Surprise: {long_name}**")
+                            st.caption("Bron: Nasdaq / Yahoo")
                             hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
                             
@@ -898,7 +928,7 @@ with tabs[1]:
                             fig_eps.update_layout(xaxis_title="Datum", yaxis_title="EPS", barmode='group', height=300, margin=dict(t=30, b=0, l=0, r=0))
                             st.plotly_chart(fig_eps, use_container_width=True)
                         else:
-                            st.info("Geen surprise grafiek data beschikbaar.")
+                            st.info("Geen earnings historie gevonden.")
                     
                     with d2:
                         st.markdown(f"**Laatste Nieuws: {long_name}**")
@@ -946,7 +976,7 @@ with tabs[1]:
             st.rerun()
 
 # --------------------------------------------------
-# TAB 3 & 4
+# TAB 3 & 4 (Ongewijzigd)
 # --------------------------------------------------
 with tabs[2]:
     st.subheader("❤️ Mijn Wishlist")

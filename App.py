@@ -8,6 +8,7 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+import time
 
 # ==================================================
 # 1. CONFIGURATIE & CONSTANTEN
@@ -18,6 +19,7 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
+# Uitgebreide mapping om Earnings data te vinden (Yahoo heeft betere data voor US tickers)
 EU_TO_US_MAP = {
     "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
     "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -25,7 +27,8 @@ EU_TO_US_MAP = {
     "OR.PA": "LRLCY", "ASML.AS": "ASML", "PHIA.AS": "PHG", "INGA.AS": "ING",
     "MT.AS": "MT", "DSM.AS": "DSM", "2PP.DE": "PYPL", "NOVO-B.CO": "NVO",
     "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD", "SHELL.AS": "SHEL",
-    "WKL.AS": "WTKWY", "9PDA.DU": "PROSY" 
+    "WKL.AS": "WTKWY", "9PDA.DU": "PROSY", "RAND.AS": "RANJY", "AKZA.AS": "AKZOY",
+    "DSM.AS": "DSM", "KPN.AS": "KKPNY", "NN.AS": "NNGP", "ASM.AS": "ASMIY"
 }
 
 TOOLTIPS = {
@@ -41,7 +44,6 @@ TOOLTIPS = {
 
 DEFAULT_PORTFOLIO = []
 
-# Consistent kleurenpalet voor sectoren (Aanpassing 1)
 SECTOR_COLORS = {
     "Technology": "#1f77b4", "Financial Services": "#ff7f0e", "Healthcare": "#2ca02c",
     "Consumer Cyclical": "#d62728", "Industrials": "#9467bd", "Consumer Defensive": "#8c564b",
@@ -109,7 +111,9 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 @st.cache_data(ttl=3600)
 def get_extended_portfolio_data(ticker):
     """
-    Haalt data op. Aangepast voor earnings historie (Aanpassing 4 & 5).
+    Haalt data op.
+    FIX: YTD berekening robuuster gemaakt.
+    FIX: Earnings data ophalen verbeterd.
     """
     try:
         tk = yf.Ticker(ticker)
@@ -117,18 +121,17 @@ def get_extended_portfolio_data(ticker):
         
         # 1. Type bepalen
         q_type = info.get('quoteType', 'EQUITY').upper()
-        if 'ETF' in q_type:
-            q_type = 'ETF'
-        else:
-            q_type = 'Aandeel'
+        if 'ETF' in q_type: q_type = 'ETF'
+        else: q_type = 'Aandeel'
             
-        # 2. Earnings Data (Uitgebreid voor Chart)
+        # 2. Earnings Data (Surprise Chart)
         earnings_surprise = None
         earnings_history_list = []
         
         try:
+            # Probeer US data te pakken voor earnings (veel completer bij Yahoo)
             us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-            earning_tk = yf.Ticker(us_ticker) if us_ticker != ticker else tk
+            earning_tk = yf.Ticker(us_ticker)
             
             dates = earning_tk.earnings_dates
             if dates is not None and not dates.empty:
@@ -136,34 +139,43 @@ def get_extended_portfolio_data(ticker):
                     dates.index = dates.index.tz_localize(None)
                 
                 now = datetime.now()
-                # Haal historie op voor chart (afgelopen 4 kwartalen)
+                # Haal historie op: data in het verleden
                 past_dates = dates[dates.index < now].sort_index(ascending=False)
                 
-                # Pak laatste 4 gerapporteerde kwartalen
-                valid_history = past_dates.head(4).dropna(subset=['Reported EPS', 'EPS Estimate'])
+                # Pak laatste 4 gerapporteerde kwartalen met data
+                valid_history = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
+                
                 if not valid_history.empty:
-                    # Zet om naar lijst voor de grafiek
+                    # Data voor Chart
                     for date, row in valid_history.iterrows():
                          earnings_history_list.append({
                              'date': date.strftime('%Y-%m-%d'),
                              'reported': row['Reported EPS'],
-                             'estimate': row['EPS Estimate']
+                             'estimate': row['EPS Estimate'],
+                             'surprise': row['Surprise(%)'] if 'Surprise(%)' in row else 0
                          })
-                    earnings_history_list.reverse() # Oud naar nieuw voor grafiek
+                    earnings_history_list.reverse() # Oud naar nieuw
 
-                    # Laatste surprise voor de tabel
+                    # Data voor Tabel (laatste resultaat)
                     last_report = valid_history.iloc[0]
                     reported = last_report.get('Reported EPS')
                     estimate = last_report.get('EPS Estimate')
                     earnings_date = valid_history.index[0]
                     
-                    if pd.notnull(reported) and pd.notnull(estimate) and estimate != 0:
-                        surprise_pct = ((reported - estimate) / abs(estimate)) * 100
+                    if pd.notnull(reported) and pd.notnull(estimate):
+                        # Zelf surprise berekenen als check
+                        val_est = float(estimate)
+                        val_rep = float(reported)
+                        if val_est != 0:
+                            surp_pct = ((val_rep - val_est) / abs(val_est)) * 100
+                        else:
+                            surp_pct = 0
+                            
                         earnings_surprise = {
                             'date': earnings_date,
-                            'reported': reported,
-                            'estimate': estimate,
-                            'surprise_pct': surprise_pct
+                            'reported': val_rep,
+                            'estimate': val_est,
+                            'surprise_pct': surp_pct
                         }
         except Exception:
             pass
@@ -175,41 +187,40 @@ def get_extended_portfolio_data(ticker):
             if not hist.empty:
                 if hist.index.tz is not None:
                     hist.index = hist.index.tz_localize(None)
-                
                 last_year = datetime.now() - timedelta(days=365)
                 recent_divs = hist[hist.index > last_year]
-                
                 for date, amount in recent_divs.items():
-                    dividend_months.append({
-                        'month': date.month,
-                        'amount': amount
-                    })
+                    dividend_months.append({'month': date.month, 'amount': amount})
         except Exception:
             pass
 
-        # 4. YTD en Dag Data ophalen (Aanpassing 2)
-        # We proberen de startprijs van het jaar op te halen voor het jaarresultaat
+        # 4. YTD Berekening (Handmatig en robuust)
         ytd_start_price = None
+        current_year = datetime.now().year
+        start_date = f"{current_year}-01-01"
         try:
-            hist_ytd = tk.history(period="ytd")
+            # Haal data op van begin dit jaar tot nu
+            hist_ytd = tk.history(start=start_date, interval="1d")
             if not hist_ytd.empty:
-                ytd_start_price = hist_ytd['Close'].iloc[0]
+                ytd_start_price = hist_ytd['Close'].iloc[0] # Eerste slotkoers van het jaar
         except:
             pass
 
         previous_close = info.get('regularMarketPreviousClose')
+        current_price = info.get('currentPrice') or previous_close
 
         return {
             'type': q_type,
             'earnings': earnings_surprise,
-            'earnings_history': earnings_history_list, # Voor grafiek
+            'earnings_history': earnings_history_list, 
             'dividend_history': dividend_months,
             'sector': info.get('sector', 'ETF/Overig'),
-            'live_price': info.get('currentPrice') or previous_close,
+            'live_price': current_price,
             'previous_close': previous_close,
             'ytd_start_price': ytd_start_price,
             'currency_symbol': info.get('currencySymbol', '€'),
             'shortName': info.get('shortName', ticker),
+            'longName': info.get('longName', ticker),
             'fallback_div_rate': info.get('dividendRate'),
             'fallback_div_yield': info.get('dividendYield')
         }
@@ -233,11 +244,13 @@ def search_yahoo_strict(query):
 
 def get_google_news(query):
     try:
-        url = f"https://news.google.com/rss/search?q={query}&hl=nl&gl=NL&ceid=NL:nl"
+        # Aangepast naar US/Engels voor betere earnings resultaten
+        query_encoded = query.replace(' ', '+')
+        url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
         r = requests.get(url, headers=HEADERS, timeout=4)
         root = ET.fromstring(r.content)
         items = []
-        for i in root.findall('./channel/item')[:4]:
+        for i in root.findall('./channel/item')[:3]:
             pub_date = i.find('pubDate').text[:16]
             items.append({
                 "title": i.find('title').text,
@@ -513,9 +526,15 @@ with tabs[0]:
                     fig = px.area(hist_data, x=hist_data.index, y='Close', title=f"Koersverloop ({chart_period})")
                     st.plotly_chart(fig, use_container_width=True)
             with col_news:
-                st.markdown("##### 📰 Recent Nieuws")
-                news_items = get_google_news(info.get('shortName', selected_ticker))
+                st.markdown("##### 📰 Earnings & Nieuws")
+                # Specifiek earnings nieuws zoeken
+                q_news = f"{info.get('shortName', selected_ticker)} earnings financial results"
+                news_items = get_google_news(q_news)
+                if not news_items: # Fallback naar algemeen nieuws
+                     news_items = get_google_news(info.get('shortName', selected_ticker))
+                
                 for item in news_items: st.markdown(f"🔹 [{item['title']}]({item['link']})\n*{item['date']}*")
+                
                 st.markdown("##### 📺 Analyse Video")
                 vid_id = get_youtube_video_id(selected_ticker)
                 if vid_id: st.video(f"https://www.youtube.com/watch?v={vid_id}")
@@ -572,14 +591,12 @@ with tabs[1]:
         total_cost_eur = 0
         total_div_eur = 0
         
-        # Voor nieuwe totaal metrics (Aanpassing 2)
         total_day_change_eur = 0
         total_year_change_eur = 0
 
         etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
         
-        # Voor grafiek EPS surprise (Aanpassing 5)
         earnings_history_store = {} 
 
         progress_bar = st.progress(0, text="Portfolio data analyseren...")
@@ -595,6 +612,7 @@ with tabs[1]:
             q_type = ext_data['type'] if ext_data else 'Aandeel'
             sector = ext_data['sector'] if ext_data else 'Onbekend'
             short_name = ext_data['shortName'] if ext_data else ticker
+            long_name = ext_data['longName'] if ext_data else short_name
             
             amount = item['amount']
             avg_price = item['avg_price']
@@ -608,22 +626,21 @@ with tabs[1]:
             cost_eur = cost_native * eur_rate
             profit_eur = val_eur - cost_eur
             
-            # GAK in Euro (Aanpassing 3)
             gak_eur = avg_price * eur_rate
 
-            # Dag resultaat berekening (Aanpassing 2)
+            # Dag resultaat
             day_gain_native = 0
             if ext_data and ext_data['previous_close']:
                 day_gain_native = (live_price - ext_data['previous_close']) * amount
             total_day_change_eur += (day_gain_native * eur_rate)
 
-            # Jaar resultaat berekening (Aanpassing 2)
+            # Jaar resultaat (YTD)
             year_gain_native = 0
             if ext_data and ext_data['ytd_start_price']:
                  year_gain_native = (live_price - ext_data['ytd_start_price']) * amount
             total_year_change_eur += (year_gain_native * eur_rate)
 
-            # --- DIVIDEND LOGICA ---
+            # Dividend
             yearly_div_eur = 0
             if ext_data:
                 if ext_data['dividend_history']:
@@ -651,7 +668,7 @@ with tabs[1]:
                 stock_stats['cost'] += cost_eur
                 stock_stats['profit'] += profit_eur
 
-            # Earnings String & Historie opslaan
+            # Earnings
             earnings_str = "-"
             earnings_color = "black"
             if ext_data:
@@ -671,10 +688,11 @@ with tabs[1]:
             portfolio_data.append({
                 "Ticker": ticker,
                 "Naam": short_name,
+                "LangeNaam": long_name,
                 "Type": q_type,
                 "Aantal": float(amount),
                 "GAK": float(avg_price),
-                "GAK (€)": float(gak_eur), # Nieuwe kolom (Aanpassing 3)
+                "GAK (€)": float(gak_eur),
                 "Prijs": live_price,
                 "Waarde (€)": val_eur,
                 "Winst (€)": profit_eur,
@@ -689,18 +707,19 @@ with tabs[1]:
             
         progress_bar.empty()
 
-        # KPI's (Aanpassing 2: Dag en Jaar resultaat toegevoegd)
-        k1, k2, k3, k4, k5 = st.columns(5)
+        # KPI's
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
         
         abs_profit = total_val_eur - total_cost_eur
         pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
         yield_pct = (total_div_eur / total_val_eur * 100) if total_val_eur else 0
         
-        k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}", delta=f"{pct_profit:.1f}% (Totaal)")
-        k2.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-        k3.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Dit jaar")
-        k4.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
-        k5.metric("Portfolio Yield", f"{yield_pct:.2f}%")
+        k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
+        k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
+        k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
+        k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Dit jaar")
+        k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
+        k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
         
         st.divider()
 
@@ -719,7 +738,6 @@ with tabs[1]:
             st.plotly_chart(fig_dist, use_container_width=True)
 
         with comp2:
-            # 2. Maandelijkse Dividend Grafiek
             monthly_vals = [monthly_div_projection[i] for i in range(1, 13)]
             if sum(monthly_vals) > 0:
                 st.markdown("**Maandelijks Dividend Projectie**")
@@ -730,14 +748,13 @@ with tabs[1]:
                 fig_div.update_layout(height=300)
                 st.plotly_chart(fig_div, use_container_width=True)
             else:
-                st.info("Geen gedetailleerde uitbetalingsdata beschikbaar voor maandgrafiek.")
+                st.info("Geen gedetailleerde uitbetalingsdata beschikbaar.")
 
-        # 3. Sectoren & Dividend per Aandeel (Aanpassing 1: Kleuren consistent)
+        # 3. Sectoren & Dividend
         col_sec, col_divstock = st.columns(2)
         with col_sec:
             st.subheader("Sectoren")
             if sector_distribution:
-                # Gebruik SECTOR_COLORS map
                 fig_pie = px.pie(names=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=0.4, color=list(sector_distribution.keys()), color_discrete_map=SECTOR_COLORS)
                 st.plotly_chart(fig_pie, use_container_width=True)
         with col_divstock:
@@ -745,13 +762,12 @@ with tabs[1]:
             df_charts = pd.DataFrame(portfolio_data)
             if not df_charts.empty:
                 df_charts = df_charts.sort_values(by="Div/Jaar (€)", ascending=False)
-                # Gebruik SECTOR_COLORS map (zodat balkjes zelfde kleur hebben als taart)
                 fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', color_discrete_map=SECTOR_COLORS)
                 st.plotly_chart(fig_bar, use_container_width=True)
 
         st.divider()
 
-        # Nieuws & Earnings (Aanpassing 4: Laatste kwartaal earnings duidelijk zichtbaar)
+        # Nieuws & Earnings
         st.subheader("🔔 Portfolio Nieuws & Earnings")
         n1, n2 = st.columns([2, 1])
         with n1:
@@ -767,27 +783,29 @@ with tabs[1]:
                     date_txt = row['Earnings'].split('(')[1].replace(')', '')
                     html_table += f"<tr><td><b>{ticker}</b></td><td style='color:{color}'>{txt}</td><td>{date_txt}</td></tr>"
                 html_table += "</table>"
-                st.markdown(html_table, unsafe_allow_html=True)
+                st.caption("Data Bron: Yahoo Finance (Schatting vs Gerapporteerd)")
             else:
-                st.info("Geen recente earnings data gevonden.")
+                st.info("Geen recente earnings data gevonden in Yahoo Finance.")
 
         with n2:
-            st.markdown("**Laatste Nieuws**")
+            st.markdown("**Laatste Earnings Nieuws**")
             sorted_port = sorted(portfolio_data, key=lambda x: x['Waarde (€)'], reverse=True)[:3]
             for item in sorted_port:
-                query = f"{item['Naam']} stock news"
+                # Specifieke query voor kwartaalcijfers
+                query = f"{item['LangeNaam']} quarterly earnings results"
                 news = get_google_news(query)
                 if news:
-                    with st.expander(f"Nieuws: {item['Ticker']}"):
+                    with st.expander(f"Cijfers: {item['Ticker']}"):
                         for n in news[:2]:
                             st.markdown(f"[{n['title']}]({n['link']})\n*{n['date']}*")
-        
-        # Nieuwe Earnings Grafiek Sectie (Aanpassing 5)
+                else:
+                    st.caption(f"Geen specifiek earnings nieuws voor {item['Ticker']}")
+
+        # Earnings Grafiek Sectie
         if earnings_history_store:
             st.divider()
             st.subheader("📉 Earnings Surprise Historie (4 Kwartalen)")
             
-            # Selectbox om een aandeel te kiezen waarvan earnings data is gevonden
             available_tickers = list(earnings_history_store.keys())
             if available_tickers:
                 eps_ticker = st.selectbox("Selecteer aandeel voor detailgrafiek:", available_tickers)
@@ -796,7 +814,6 @@ with tabs[1]:
                     hist_data = earnings_history_store[eps_ticker]
                     df_eps = pd.DataFrame(hist_data)
                     
-                    # Grafiek maken: Reported vs Estimate
                     fig_eps = go.Figure()
                     fig_eps.add_trace(go.Bar(
                         x=df_eps['date'],
@@ -812,18 +829,18 @@ with tabs[1]:
                     ))
                     
                     fig_eps.update_layout(
-                        title=f"Earnings vs Estimates: {eps_ticker}",
+                        title=f"Earnings vs Estimates: {eps_ticker} (Bron: Yahoo Finance)",
                         xaxis_title="Datum",
                         yaxis_title="EPS",
                         barmode='group'
                     )
                     st.plotly_chart(fig_eps, use_container_width=True)
             else:
-                st.info("Geen uitgebreide earnings historie beschikbaar voor je portfolio.")
+                st.info("Geen uitgebreide earnings historie beschikbaar.")
 
         st.divider()
 
-        # Editor Tabel (Aanpassing 3: GAK Euro kolom toegevoegd)
+        # Editor Tabel
         st.subheader("📋 Positie Overzicht & Bewerken")
         df_editor_source = pd.DataFrame(portfolio_data)
         column_settings = {
@@ -832,14 +849,13 @@ with tabs[1]:
             "Type": st.column_config.TextColumn("Type", disabled=True),
             "Aantal": st.column_config.NumberColumn("Aantal", min_value=0.0001, required=True, step=1.0),
             "GAK": st.column_config.NumberColumn("GAK (Origineel)", format="%.2f"),
-            "GAK (€)": st.column_config.NumberColumn("GAK (€)", format="€ %.2f", disabled=True), # Nieuw
+            "GAK (€)": st.column_config.NumberColumn("GAK (€)", format="€ %.2f", disabled=True),
             "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
             "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
             "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
             "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
             "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
         }
-        # Kolom volgorde bijgewerkt
         edited_df = st.data_editor(
             df_editor_source, 
             column_config=column_settings, 

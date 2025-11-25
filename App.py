@@ -9,7 +9,7 @@ import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import time
-import streamlit_authenticator as stauth # NIEUW: Voor inloggen
+import streamlit_authenticator as stauth
 
 # ==================================================
 # 1. CONFIGURATIE & AUTHENTICATIE
@@ -17,11 +17,9 @@ import streamlit_authenticator as stauth # NIEUW: Voor inloggen
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
 # --- AUTHENTICATIE CONFIGURATIE ---
-# In een echte situatie zet je dit in een apart 'config.yaml' bestand, 
-# maar voor nu staat het hier hardcoded.
-# Wachtwoord is 'admin' (gehasht).
 names = ['Eigenaar']
 usernames = ['admin']
+# Wachtwoord is 'admin'
 passwords = ['$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW'] 
 
 hashed_passwords = passwords
@@ -41,19 +39,25 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=30
 )
 
-# Inlog Widget
-name, authentication_status, username = authenticator.login('main')
+# --- INLOGGEN (AANGEPAST VOOR NIEUWE VERSIE) ---
+# 1. Toon de login widget
+authenticator.login(location='main')
 
-if authentication_status is False:
+# 2. Check de status via session_state
+if st.session_state["authentication_status"] is False:
     st.error('Gebruikersnaam of wachtwoord is onjuist')
-elif authentication_status is None:
+elif st.session_state["authentication_status"] is None:
     st.warning('Voer je inloggegevens in')
 
-# --- HOOFD APPLICATIE START HIER ---
-if authentication_status:
-    # Logout knop in de sidebar
+# 3. Als we ingelogd zijn, toon de app
+elif st.session_state["authentication_status"]:
+    
+    # Logout knop in sidebar
     authenticator.logout('Uitloggen', 'sidebar')
-    st.sidebar.write(f'Ingelogd als: *{name}*')
+    
+    # Haal de naam op uit session state
+    user_name = st.session_state["name"]
+    st.sidebar.write(f'Ingelogd als: *{user_name}*')
     st.sidebar.divider()
 
     # Debug: Toon versie
@@ -234,77 +238,46 @@ if authentication_status:
     @st.cache_data(ttl=3600)
     def scrape_yahoo_analysis_html(ticker):
         """
-        NIEUW: Scraped direct de HTML van de Analysis tab als de API faalt.
-        Dit is robuuster voor Europese tickers zoals WKL.AS
+        Scraped direct de HTML van de Analysis tab als de API faalt.
         """
         try:
-            # Soms werkt de originele ticker beter (WKL.AS), soms de US variant.
-            # We proberen de originele eerst, want de pagina URL is vaak case-sensitive.
             url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
-            
-            # Pandas read_html zoekt naar alle tabellen in de HTML
             dfs = pd.read_html(url, storage_options={'User-Agent': HEADERS['User-Agent']})
-            
-            # We zoeken naar de tabel die 'Earnings History' bevat
             target_df = None
             for df in dfs:
-                # Soms zijn kolomnamen multi-index, we flatten ze voor de zekerheid
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = [' '.join(col).strip() for col in df.columns.values]
-                
-                # Check of de tabel lijkt op Earnings History
-                # Vaak is de eerste kolom 'Earnings History' of 'EPS Est.'
                 s_df = df.astype(str)
                 if s_df.apply(lambda x: x.str.contains('EPS Est', case=False)).any().any():
                     target_df = df
                     break
             
             if target_df is not None:
-                # Yahoo Analysis tabel is vaak getransponeerd (datums als kolommen)
-                # Of rijen: "EPS Est.", "EPS Actual", "Difference", "Surprise %"
-                # We moeten dit omzetten naar ons formaat.
-                
-                # Zet index naar eerste kolom als die string labels bevat
                 target_df.set_index(target_df.columns[0], inplace=True)
-                
-                # Zoek de specifieke rijen
                 try:
                     est_row = target_df.loc[target_df.index.str.contains("EPS Est", case=False, na=False)].iloc[0]
                     act_row = target_df.loc[target_df.index.str.contains("EPS Actual", case=False, na=False)].iloc[0]
                     surp_row = target_df.loc[target_df.index.str.contains("Surprise", case=False, na=False)].iloc[0]
                     
                     history = []
-                    # De kolommen zijn de datums (kwartalen)
                     for col_date in target_df.columns:
                         try:
-                            # Datum parsing kan lastig zijn (bijv "12/30/2024")
-                            # Yahoo gebruikt vaak M/D/Y
-                            # Soms staat er 'Current Qtr' of 'Next Qtr', die slaan we over.
-                            # We zoeken naar datums in het verleden.
                             est_val = float(est_row[col_date])
                             act_val = float(act_row[col_date])
                             surp_val = str(surp_row[col_date]).replace('%', '')
                             surp_val = float(surp_val) if surp_val != '-' and surp_val != 'N/A' else 0.0
 
-                            # Alleen toevoegen als er 'Actual' data is (dus verleden)
                             if not pd.isna(act_val):
                                 history.append({
-                                    'date': col_date, # We laten de datum even als string (bijv '9/29/2024')
+                                    'date': col_date,
                                     'reported': act_val,
                                     'estimate': est_val,
                                     'surprise': surp_val
                                 })
                         except: continue
-                    
                     if history:
-                        # De laatste kolom is vaak het meest recent bij Yahoo Analysis tabel
-                        # Maar we moeten even checken op de volgorde. Vaak links=oud, rechts=nieuw of andersom.
-                        # Yahoo toont meestal: Current Qtr, Next Qtr, Current Year, Next Year (niet historie).
-                        # Wacht, 'Earnings History' tabel staat meestal lager op de pagina en heeft datums als kolommen 
-                        # zoals '9/29/2024', '6/29/2024'.
                         return history
                 except: pass
-
         except Exception:
             pass
         return []
@@ -340,23 +313,18 @@ if authentication_status:
                 earnings_history_list = earnings_data['earnings_history']
                 earnings_surprise = earnings_data['last_surprise']
             else:
-                # 1. Probeer de nieuwe HTML Scraper (Yahoo Analysis)
                 try:
                     scraped_hist = scrape_yahoo_analysis_html(ticker)
                     if not scraped_hist:
-                         # Probeer US ticker als fallback
                          us_tick = EU_TO_US_MAP.get(ticker)
                          if us_tick: scraped_hist = scrape_yahoo_analysis_html(us_tick)
                     
                     if scraped_hist:
                         earnings_history_list = scraped_hist
-                        # Neem de meest recente (laatste in de lijst of eerste, afhankelijk van scraping)
-                        # We gaan er vanuit dat de lijst chronologisch is opgebouwd
                         last = earnings_history_list[-1] 
                         earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
                 except: pass
 
-                # 2. Fallback: Yahoo API interne methoden (als scraper faalt)
                 if not earnings_history_list:
                     try:
                         tickers_to_try = [EU_TO_US_MAP.get(ticker), ticker]

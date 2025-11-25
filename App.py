@@ -8,7 +8,6 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
-import time
 
 # ==================================================
 # 1. CONFIGURATIE & CONSTANTEN
@@ -184,7 +183,6 @@ def get_extended_portfolio_data(ticker):
         ytd_start_price = None
         current_year = datetime.now().year
         try:
-            # Haal 1e handelsdag van het jaar op
             start_of_year = f"{current_year}-01-01"
             hist_ytd = tk.history(start=start_of_year, interval="1d")
             if not hist_ytd.empty:
@@ -203,7 +201,7 @@ def get_extended_portfolio_data(ticker):
             'sector': info.get('sector', 'ETF/Overig'),
             'live_price': current_price,
             'previous_close': previous_close,
-            'ytd_start_price': ytd_start_price, # Nu correct 1 jan
+            'ytd_start_price': ytd_start_price, 
             'currency_symbol': info.get('currencySymbol', '€'),
             'shortName': info.get('shortName', ticker),
             'longName': info.get('longName', ticker),
@@ -575,7 +573,7 @@ with tabs[1]:
         total_cost_eur = 0
         total_div_eur = 0
         total_day_change_eur = 0
-        total_year_change_eur = 0 # YTD
+        total_year_change_eur = 0
 
         etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
@@ -623,7 +621,6 @@ with tabs[1]:
                  # Winst dit jaar = (Huidig - Jan 1) * Aantal
                  ytd_gain_native = (live_price - ext_data['ytd_start_price']) * amount
             else:
-                 # Fallback als ytd niet beschikbaar is
                  ytd_gain_native = 0 
             total_year_change_eur += (ytd_gain_native * eur_rate)
 
@@ -695,14 +692,13 @@ with tabs[1]:
             
         progress_bar.empty()
         
-        # Sorteer op Totale Waarde (Request 4)
+        # Sorteer op Totale Waarde
         portfolio_data.sort(key=lambda x: x["Waarde (€)"], reverse=True)
 
         # ---------------------------
         # SECTIE 1: Overzicht (Metrics & Cijfers)
         # ---------------------------
         with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
-            # KPI's
             k1, k2, k3, k4, k5, k6 = st.columns(6)
             
             abs_profit = total_val_eur - total_cost_eur
@@ -718,7 +714,6 @@ with tabs[1]:
             
             st.divider()
 
-            # ETF vs Aandelen & Sectoren
             comp1, comp2 = st.columns(2)
             with comp1:
                 st.markdown("**Verdeling: Aandelen vs ETF's**")
@@ -777,8 +772,8 @@ with tabs[1]:
                 "Naam": st.column_config.TextColumn("Naam", disabled=True),
                 "Type": st.column_config.TextColumn("Type", disabled=True),
                 "Aantal": st.column_config.NumberColumn("Aantal", min_value=0.0001, required=True, step=1.0),
-                "GAK": st.column_config.NumberColumn("GAK (Origineel)", format="%.2f", disabled=True), # Auto berekend
-                "GAK (€)": st.column_config.NumberColumn("GAK (€)", format="€ %.2f", disabled=False), # Nu aanpasbaar (Request 3)
+                "GAK": st.column_config.NumberColumn("GAK (Origineel)", format="%.2f", disabled=True),
+                "GAK (€)": st.column_config.NumberColumn("GAK (€)", format="€ %.2f", disabled=False),
                 "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
                 "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
                 "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
@@ -786,25 +781,33 @@ with tabs[1]:
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
             }
             
-            # Request 2: Clickable (on_select)
-            event = st.data_editor(
+            # De FIX: We vangen het 'event' op, dit is GEEN DataFrame meer in nieuwere Streamlit versies
+            editor_event = st.data_editor(
                 df_editor_source, 
                 column_config=column_settings, 
                 column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
                 hide_index=True, 
                 use_container_width=True, 
                 key="main_portfolio_editor",
-                on_select="rerun", # Zorgt voor interactie
+                on_select="rerun",  # Dit zorgt voor de klik-actie
                 selection_mode="single-row"
             )
 
+            # Haal de data uit het event object
+            edited_df = editor_event.data
+            
             # Update Logic (Inclusief GAK € editing)
-            if not df_editor_source.equals(event):
+            if not df_editor_source.equals(edited_df):
                 new_state_portfolio = []
-                for index, row in event.iterrows():
+                for index, row in edited_df.iterrows():
                     if not row['Verwijder']:
                         # Check of GAK (€) is veranderd door gebruiker
-                        orig_row = df_editor_source.iloc[index]
+                        # We halen de originele rij op om te vergelijken
+                        if index in df_editor_source.index:
+                            orig_row = df_editor_source.loc[index]
+                        else:
+                            orig_row = row 
+
                         new_gak_eur = row['GAK (€)']
                         rate = row['_rate']
                         
@@ -812,7 +815,7 @@ with tabs[1]:
                         if abs(new_gak_eur - orig_row['GAK (€)']) > 0.001:
                              new_avg_price = new_gak_eur / rate if rate > 0 else new_gak_eur
                         else:
-                             new_avg_price = row['GAK'] # Blijft gelijk (of is al native)
+                             new_avg_price = row['GAK']
 
                         new_state_portfolio.append({
                             'ticker': row['Ticker'], 
@@ -824,40 +827,43 @@ with tabs[1]:
                 st.session_state['portfolio'] = new_state_portfolio
                 st.rerun()
 
-            # DETAIL WEERGAVE NA KLIK
-            if len(event.selection['rows']) > 0:
-                selected_idx = event.selection['rows'][0]
-                sel_row = df_editor_source.iloc[selected_idx]
-                sel_ticker = sel_row['Ticker']
-                sel_name = sel_row['LangeNaam']
+            # DETAIL WEERGAVE NA KLIK (Gebruik selection uit event)
+            if len(editor_event.selection['rows']) > 0:
+                selected_idx = editor_event.selection['rows'][0]
+                
+                # Veiligheidscheck index
+                if selected_idx < len(edited_df):
+                    sel_row = edited_df.iloc[selected_idx]
+                    sel_ticker = sel_row['Ticker']
+                    sel_name = sel_row['LangeNaam']
 
-                st.markdown(f"#### 🔎 Details: {sel_name} ({sel_ticker})")
-                
-                d1, d2 = st.columns([2, 1])
-                
-                with d1:
-                    if sel_ticker in earnings_history_store:
-                        st.markdown("**Earnings Surprise Historie**")
-                        hist_data = earnings_history_store[sel_ticker]
-                        df_eps = pd.DataFrame(hist_data)
-                        
-                        fig_eps = go.Figure()
-                        fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['estimate'], name='Verwachting', marker_color='lightgray'))
-                        fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['reported'], name='Gerapporteerd', marker_color='#1f77b4'))
-                        fig_eps.update_layout(xaxis_title="Datum", yaxis_title="EPS", barmode='group', height=300, margin=dict(t=30, b=0, l=0, r=0))
-                        st.plotly_chart(fig_eps, use_container_width=True)
-                    else:
-                        st.info("Geen surprise grafiek data beschikbaar.")
-                
-                with d2:
-                    st.markdown("**Laatste Earnings Nieuws**")
-                    query = f"{sel_name} earnings stock news"
-                    news = get_google_news(query)
-                    if news:
-                        for n in news:
-                            st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
-                    else:
-                        st.write("Geen specifiek nieuws gevonden.")
+                    st.markdown(f"#### 🔎 Details: {sel_name} ({sel_ticker})")
+                    
+                    d1, d2 = st.columns([2, 1])
+                    
+                    with d1:
+                        if sel_ticker in earnings_history_store:
+                            st.markdown("**Earnings Surprise Historie**")
+                            hist_data = earnings_history_store[sel_ticker]
+                            df_eps = pd.DataFrame(hist_data)
+                            
+                            fig_eps = go.Figure()
+                            fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['estimate'], name='Verwachting', marker_color='lightgray'))
+                            fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['reported'], name='Gerapporteerd', marker_color='#1f77b4'))
+                            fig_eps.update_layout(xaxis_title="Datum", yaxis_title="EPS", barmode='group', height=300, margin=dict(t=30, b=0, l=0, r=0))
+                            st.plotly_chart(fig_eps, use_container_width=True)
+                        else:
+                            st.info("Geen surprise grafiek data beschikbaar.")
+                    
+                    with d2:
+                        st.markdown("**Laatste Earnings Nieuws**")
+                        query = f"{sel_name} earnings stock news"
+                        news = get_google_news(query)
+                        if news:
+                            for n in news:
+                                st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
+                        else:
+                            st.write("Geen specifiek nieuws gevonden.")
 
         # ---------------------------
         # SECTIE 4: Calculator

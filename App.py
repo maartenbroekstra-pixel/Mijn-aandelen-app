@@ -258,6 +258,16 @@ def get_extended_portfolio_data(ticker):
                     dividend_months.append({'month': date.month, 'amount': amount})
         except: pass
 
+        # 4. YTD (Jan 1 koers)
+        ytd_start_price = None
+        current_year = datetime.now().year
+        try:
+            start_of_year = f"{current_year}-01-01"
+            hist_ytd = tk.history(start=start_of_year, interval="1d")
+            if not hist_ytd.empty:
+                ytd_start_price = hist_ytd['Close'].iloc[0]
+        except: pass
+
         current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
         previous_close = info.get('regularMarketPreviousClose')
 
@@ -273,6 +283,7 @@ def get_extended_portfolio_data(ticker):
             'sector': info.get('sector', 'ETF/Overig'),
             'live_price': current_price,
             'previous_close': previous_close,
+            'ytd_start_price': ytd_start_price,
             'currency_symbol': info.get('currencySymbol', '€'),
             'shortName': info.get('shortName', ticker),
             'longName': info.get('longName', ticker),
@@ -657,6 +668,7 @@ with tabs[1]:
                 ext_data = {
                     'live_price': 0, 
                     'previous_close': 0, 
+                    'ytd_start_price': 0,
                     'type': 'Onbekend', 
                     'sector': 'Fout', 
                     'currency_symbol': item.get('symbol', '?'),
@@ -698,10 +710,10 @@ with tabs[1]:
                 if ext_data.get('previous_close'):
                     total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                 
-            # 2. Totaal Winst vs GAK (vervangt YTD 1 jan logica)
-            # Dit is de pure winst/verlies van het portfolio
-            # Omdat we geen datum hebben, is dit de beste "Performance" metriek.
-            
+                # 2. YTD (Sinds 1 Jan) - TERUGGEZET
+                if ext_data.get('ytd_start_price'):
+                     total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
+
             # Dividend
             yearly_div_eur = 0
             if ext_data:
@@ -794,8 +806,8 @@ with tabs[1]:
             k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
             k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
             k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-            # AANGEPAST: Dit toont nu pure winst vs GAK als 4e metric ipv YTD(Jan 1)
-            k4.metric("Totaal Winst (vs GAK)", f"€ {abs_profit:,.2f}", help="Huidige Waarde - Aankoopwaarde")
+            # YTD METRIC TERUGGEZET
+            k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
             k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
             k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
             
@@ -922,11 +934,50 @@ with tabs[1]:
                             hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
                             
+                            # SCATTER PLOT LOGICA (BOLLETJES)
                             fig_eps = go.Figure()
-                            fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['estimate'], name='Verwachting', marker_color='lightgray'))
-                            fig_eps.add_trace(go.Bar(x=df_eps['date'], y=df_eps['reported'], name='Gerapporteerd', marker_color='#1f77b4'))
-                            fig_eps.update_layout(xaxis_title="Datum", yaxis_title="EPS", barmode='group', height=300, margin=dict(t=30, b=0, l=0, r=0))
+                            
+                            # Verwacht (Lichtblauw)
+                            fig_eps.add_trace(go.Scatter(
+                                x=df_eps['date'], 
+                                y=df_eps['estimate'], 
+                                name='Verwacht', 
+                                mode='markers',
+                                marker=dict(color='#a5d8ff', size=15, symbol='circle')
+                            ))
+                            
+                            # Werkelijk (Donkerblauw)
+                            fig_eps.add_trace(go.Scatter(
+                                x=df_eps['date'], 
+                                y=df_eps['reported'], 
+                                name='Werkelijk', 
+                                mode='markers',
+                                marker=dict(color='#448aff', size=15, symbol='circle')
+                            ))
+                            
+                            fig_eps.update_layout(
+                                xaxis_title="Datum", 
+                                yaxis_title="EPS", 
+                                height=300, 
+                                margin=dict(t=30, b=0, l=0, r=0),
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                            )
+                            fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
                             st.plotly_chart(fig_eps, use_container_width=True)
+                            
+                            # METRICS ONDER DE GRAFIEK (Zoals in screenshot)
+                            latest = df_eps.iloc[-1] # Laatste datapunt
+                            est = latest['estimate']
+                            rep = latest['reported']
+                            diff = rep - est
+                            pct = latest['surprise']
+                            
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("Verwacht EPS", f"{est:.2f}", delta_color="off")
+                            m2.metric("Werkelijk EPS", f"{rep:.2f}", delta_color="off")
+                            m3.metric("Verschil EPS", f"{diff:+.2f}")
+                            m4.metric("Verschil %", f"{pct:+.1f}%", delta_color="normal")
+
                         else:
                             st.info("Geen earnings historie gevonden.")
                     

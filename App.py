@@ -56,7 +56,6 @@ DEFAULT_PORTFOLIO = []
 # ==================================================
 # KLEURENPALET: MATTE & MODERN
 # ==================================================
-# Een stijlvol, gedempt palet in plaats van neon.
 MATTE_COLORS = {
     "blue": "#457B9D",      # Steel Blue
     "green": "#2A9D8F",     # Jungle Green/Sage
@@ -68,7 +67,6 @@ MATTE_COLORS = {
     "grey": "#A8DADC"       # Powder Blue/Grey
 }
 
-# Mapping van sectoren naar het matte palet
 SECTOR_COLORS = {
     "Technology": MATTE_COLORS["blue"],
     "Financial Services": MATTE_COLORS["charcoal"],
@@ -77,11 +75,11 @@ SECTOR_COLORS = {
     "Industrials": MATTE_COLORS["purple"],
     "Consumer Defensive": MATTE_COLORS["orange"],
     "Energy": MATTE_COLORS["yellow"],
-    "Communication Services": "#D62828", # Matte Deep Red
-    "Real Estate": "#8D6E63",            # Earthy Brown
-    "Basic Materials": "#5F9EA0",        # Cadet Blue
-    "Utilities": "#76FF03",              # (Behouden voor contrast of dempen naar #81C784)
-    "ETF/Overig": "#B0BEC5"              # Cool Grey
+    "Communication Services": "#D62828", 
+    "Real Estate": "#8D6E63",           
+    "Basic Materials": "#5F9EA0",        
+    "Utilities": "#76FF03",              
+    "ETF/Overig": "#B0BEC5"              
 }
 
 # ==================================================
@@ -223,29 +221,38 @@ def get_extended_portfolio_data(ticker):
             earnings_history_list = earnings_data['earnings_history']
             earnings_surprise = earnings_data['last_surprise']
         else:
+            # Verbeterde Yahoo Fallback
             try:
-                us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-                earning_tk = yf.Ticker(us_ticker)
-                dates = earning_tk.earnings_dates
-                if dates is not None and not dates.empty:
-                    if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
-                    now = datetime.now()
-                    past_dates = dates[dates.index < now].sort_index(ascending=False)
-                    valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
-                    if not valid.empty:
-                        for date, row in valid.iterrows():
-                             earnings_history_list.append({
-                                 'date': date.strftime('%Y-%m-%d'),
-                                 'reported': row['Reported EPS'],
-                                 'estimate': row['EPS Estimate'],
-                                 'surprise': row['Surprise(%)']
-                             })
-                        earnings_history_list.reverse()
-                        last = valid.iloc[0]
-                        est = last['EPS Estimate']
-                        rep = last['Reported EPS']
-                        surp = ((rep - est)/abs(est)*100) if est!=0 else 0
-                        earnings_surprise = {'date': valid.index[0], 'surprise_pct': surp}
+                # We proberen eerst de US ticker, dan de originele
+                tickers_to_try = [EU_TO_US_MAP.get(ticker), ticker]
+                tickers_to_try = [t for t in tickers_to_try if t] # filter None
+
+                for t_try in tickers_to_try:
+                    earning_tk = yf.Ticker(t_try)
+                    dates = earning_tk.earnings_dates
+                    
+                    if dates is not None and not dates.empty:
+                        if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
+                        now = datetime.now()
+                        past_dates = dates[dates.index < now].sort_index(ascending=False)
+                        
+                        # Zoek rijen waar zowel Reported als Estimate bekend zijn
+                        valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
+                        
+                        if not valid.empty:
+                            for date, row in valid.iterrows():
+                                 earnings_history_list.append({
+                                     'date': date.strftime('%Y-%m-%d'),
+                                     'reported': row['Reported EPS'],
+                                     'estimate': row['EPS Estimate'],
+                                     'surprise': row['Surprise(%)'] * 100 if abs(row['Surprise(%)']) < 5 else row['Surprise(%)'] # Yahoo geeft soms fracties, soms %
+                                 })
+                            
+                            earnings_history_list.reverse()
+                            if earnings_history_list:
+                                last = earnings_history_list[-1]
+                                earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
+                            break # Als we data hebben, stoppen we met zoeken
             except: pass
 
         dividend_months = []
@@ -270,6 +277,7 @@ def get_extended_portfolio_data(ticker):
 
         current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
         previous_close = info.get('regularMarketPreviousClose')
+        target_price = info.get('targetMeanPrice') # Ophalen koersdoel
 
         if not current_price:
              try: current_price = tk.fast_info.last_price
@@ -282,6 +290,7 @@ def get_extended_portfolio_data(ticker):
             'dividend_history': dividend_months,
             'sector': info.get('sector', 'ETF/Overig'),
             'live_price': current_price,
+            'target_price': target_price,
             'previous_close': previous_close,
             'ytd_start_price': ytd_start_price,
             'currency_symbol': info.get('currencySymbol', '€'),
@@ -662,6 +671,7 @@ with tabs[1]:
         total_div_eur = 0
         total_day_change_eur = 0
         total_year_change_eur = 0
+        total_potential_eur = 0 # Nieuwe variabele voor potentiële waarde
 
         etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
@@ -685,6 +695,7 @@ with tabs[1]:
                 failed_tickers.append(ticker)
                 ext_data = {
                     'live_price': 0, 
+                    'target_price': 0,
                     'previous_close': 0, 
                     'ytd_start_price': 0,
                     'type': 'Onbekend', 
@@ -698,6 +709,7 @@ with tabs[1]:
 
             # Data extractie
             live_price = ext_data.get('live_price', 0)
+            target_price = ext_data.get('target_price') # Kan None zijn
             if live_price is None: live_price = 0
             
             q_type = ext_data.get('type', 'Aandeel')
@@ -717,6 +729,11 @@ with tabs[1]:
             cost_eur = cost_native * eur_rate
             profit_eur = val_eur - cost_eur
             
+            # Potentiële waarde berekening (gebruik target indien beschikbaar, anders current)
+            used_target = target_price if target_price else live_price
+            potential_eur = used_target * amount * eur_rate
+            total_potential_eur += potential_eur
+            
             gak_eur = avg_price * eur_rate
 
             # Metrics
@@ -724,11 +741,11 @@ with tabs[1]:
             total_cost_eur += cost_eur
             
             if not data_failed:
-                # 1. Dag Resultaat: Verschil vandaag
+                # 1. Dag Resultaat
                 if ext_data.get('previous_close'):
                     total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                 
-                # 2. YTD (Sinds 1 Jan)
+                # 2. YTD
                 if ext_data.get('ytd_start_price'):
                      total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
 
@@ -820,17 +837,19 @@ with tabs[1]:
         # SECTIE 1: Overzicht
         # ---------------------------
         with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
-            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            # AANGEPAST: 7 kolommen nu om Potentiële Waarde toe te voegen
+            k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
             abs_profit = total_val_eur - total_cost_eur
             pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
             yield_pct = (total_div_eur / total_val_eur * 100) if total_val_eur else 0
             
             k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
-            k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
-            k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-            k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
-            k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
-            k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
+            k2.metric("Potentiële Waarde", f"€ {total_potential_eur:,.2f}", help="Op basis van koersdoelen analisten")
+            k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
+            k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
+            k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
+            k6.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
+            k7.metric("Portfolio Yield", f"{yield_pct:.2f}%")
             
             st.divider()
 
@@ -970,9 +989,6 @@ with tabs[1]:
                     sel_info = ticker_details_map.get(selected_ticker, {})
                     long_name = sel_info.get('longName', selected_ticker)
                     
-                    # UPDATED: Layout Logic (Stacked instead of Columns for Mobile)
-                    # Hier verwijderen we de d1, d2 columns om het verticaal te stapelen
-                    
                     if selected_ticker in earnings_history_store:
                         st.markdown(f"**Earnings Surprise: {long_name}**")
                         st.caption("Bron: Nasdaq / Yahoo")
@@ -1028,9 +1044,17 @@ with tabs[1]:
                         m2.metric("Werkelijk EPS", f"{rep:.2f}")
                         m3.metric("Verschil", f"{diff:+.2f}")
                         
-                        # AANGEPAST: Geen getal onder het percentage, alleen kleur
+                        # AANGEPAST: Geen getal onder het percentage, alleen kleur, met juiste fontgrootte
                         color_pct = MATTE_COLORS["green"] if pct > 0 else MATTE_COLORS["red"]
-                        m4.markdown(f"<p style='margin-bottom:0px; font-size:14px;'>Surprise %</p><p style='color:{color_pct}; font-size:26px; font-weight:bold; margin-top:0px;'>{pct:+.1f}%</p>", unsafe_allow_html=True)
+                        m4.markdown(
+                            f"""
+                            <div style="font-family: sans-serif;">
+                                <div style="font-size: 14px; color: rgb(49, 51, 63); margin-bottom: 4px;">Surprise %</div>
+                                <div style="font-size: 32px; font-weight: 600; color: {color_pct};">{pct:+.1f}%</div>
+                            </div>
+                            """, 
+                            unsafe_allow_html=True
+                        )
 
                     else:
                         st.info("Geen earnings historie gevonden.")

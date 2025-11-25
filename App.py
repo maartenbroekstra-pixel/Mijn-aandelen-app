@@ -8,11 +8,15 @@ import json
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+import time
 
 # ==================================================
 # 1. CONFIGURATIE & CONSTANTEN
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
+
+# Debug: Toon versie in sidebar om zeker te zijn
+st.sidebar.caption(f"Streamlit versie: {st.__version__}")
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -108,10 +112,31 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 
 @st.cache_data(ttl=3600)
 def get_extended_portfolio_data(ticker):
+    # FIX: Vertraging om Yahoo 'Too Many Requests' te voorkomen
+    time.sleep(0.3)
+    
     try:
         tk = yf.Ticker(ticker)
+        # We proberen fast_info als backup als .info faalt (door rate limit)
+        fast_info = tk.fast_info 
         info = tk.info
         
+        # Check validiteit data
+        if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
+             if fast_info and fast_info.last_price:
+                 current_price = fast_info.last_price
+                 previous_close = fast_info.previous_close
+                 # Fake info object om crashes te voorkomen
+                 info = {
+                     'quoteType': 'EQUITY', 
+                     'sector': 'Onbekend', 
+                     'currencySymbol': '?', 
+                     'shortName': ticker,
+                     'longName': ticker
+                 }
+             else:
+                 return None # Data ophalen mislukt
+
         # 1. Type bepalen
         q_type = info.get('quoteType', 'EQUITY').upper()
         if 'ETF' in q_type: q_type = 'ETF'
@@ -179,7 +204,7 @@ def get_extended_portfolio_data(ticker):
         except Exception:
             pass
 
-        # 4. YTD Berekening Correctie (1 Jan koers)
+        # 4. YTD Berekening
         ytd_start_price = None
         current_year = datetime.now().year
         try:
@@ -192,6 +217,10 @@ def get_extended_portfolio_data(ticker):
 
         previous_close = info.get('regularMarketPreviousClose')
         current_price = info.get('currentPrice') or previous_close
+
+        if not current_price:
+             try: current_price = tk.fast_info.last_price
+             except: pass
 
         return {
             'type': q_type,
@@ -578,6 +607,7 @@ with tabs[1]:
         etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
         
+        failed_tickers = []
         earnings_history_store = {} 
 
         progress_bar = st.progress(0, text="Portfolio data analyseren...")
@@ -588,12 +618,32 @@ with tabs[1]:
             
             ext_data = get_extended_portfolio_data(ticker)
             
+            # FIX: Fallback als data ophalen mislukt (Rate Limit)
+            data_failed = False
+            if ext_data is None:
+                data_failed = True
+                failed_tickers.append(ticker)
+                ext_data = {
+                    'live_price': 0, 
+                    'previous_close': 0, 
+                    'ytd_start_price': 0,
+                    'type': 'Onbekend', 
+                    'sector': 'Fout', 
+                    'currency_symbol': item.get('symbol', '?'),
+                    'shortName': f"⚠️ {ticker} (Fout)", 
+                    'longName': ticker,
+                    'earnings': None, 
+                    'dividend_history': []
+                }
+
             # Fallbacks
-            live_price = ext_data['live_price'] if ext_data and ext_data['live_price'] else item['avg_price']
-            q_type = ext_data['type'] if ext_data else 'Aandeel'
-            sector = ext_data['sector'] if ext_data else 'Onbekend'
-            short_name = ext_data['shortName'] if ext_data else ticker
-            long_name = ext_data['longName'] if ext_data else short_name
+            live_price = ext_data.get('live_price', 0)
+            if live_price is None: live_price = 0
+            
+            q_type = ext_data.get('type', 'Aandeel')
+            sector = ext_data.get('sector', 'Onbekend')
+            short_name = ext_data.get('shortName', ticker)
+            long_name = ext_data.get('longName', ticker)
             
             amount = item['amount']
             avg_price = item['avg_price']
@@ -609,25 +659,22 @@ with tabs[1]:
             
             gak_eur = avg_price * eur_rate
 
-            # Dag resultaat
-            day_gain_native = 0
-            if ext_data and ext_data['previous_close']:
-                day_gain_native = (live_price - ext_data['previous_close']) * amount
-            total_day_change_eur += (day_gain_native * eur_rate)
-
-            # Jaar resultaat (YTD) - Correctie per aandeel t.o.v 1 jan
-            ytd_gain_native = 0
-            if ext_data and ext_data['ytd_start_price']:
-                 # Winst dit jaar = (Huidig - Jan 1) * Aantal
-                 ytd_gain_native = (live_price - ext_data['ytd_start_price']) * amount
-            else:
-                 ytd_gain_native = 0 
-            total_year_change_eur += (ytd_gain_native * eur_rate)
+            # Metrics
+            total_val_eur += val_eur
+            total_cost_eur += cost_eur
+            
+            if not data_failed:
+                # Dag resultaat
+                if ext_data.get('previous_close'):
+                    total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
+                # Jaar resultaat (YTD)
+                if ext_data.get('ytd_start_price'):
+                     total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
 
             # Dividend
             yearly_div_eur = 0
             if ext_data:
-                if ext_data['dividend_history']:
+                if ext_data.get('dividend_history'):
                     for div_pay in ext_data['dividend_history']:
                         payout_eur = div_pay['amount'] * amount * eur_rate
                         monthly_div_projection[div_pay['month']] += payout_eur
@@ -636,9 +683,7 @@ with tabs[1]:
                     yearly_div_eur = ext_data['fallback_div_rate'] * amount * eur_rate
                 elif ext_data.get('fallback_div_yield') and ext_data['fallback_div_yield'] > 0:
                     yearly_div_eur = (live_price * ext_data['fallback_div_yield']) * amount * eur_rate
-
-            total_val_eur += val_eur
-            total_cost_eur += cost_eur
+            
             total_div_eur += yearly_div_eur
             
             sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
@@ -652,14 +697,14 @@ with tabs[1]:
                 stock_stats['cost'] += cost_eur
                 stock_stats['profit'] += profit_eur
 
-            # Earnings text
+            # Earnings
             earnings_str = "-"
             earnings_color = "black"
             if ext_data:
-                if ext_data['earnings_history']:
+                if ext_data.get('earnings_history'):
                     earnings_history_store[ticker] = ext_data['earnings_history']
                 
-                if ext_data['earnings']:
+                if ext_data.get('earnings'):
                     surp = ext_data['earnings']['surprise_pct']
                     date_str = ext_data['earnings']['date'].strftime('%d-%m')
                     if surp > 0:
@@ -668,6 +713,11 @@ with tabs[1]:
                     else:
                         earnings_str = f"Miss: {surp:.1f}% ({date_str})"
                         earnings_color = "red"
+            
+            display_price = live_price
+            if data_failed:
+                display_price = 0.0
+                earnings_str = "⚠️ ERROR"
 
             portfolio_data.append({
                 "Ticker": ticker,
@@ -677,7 +727,7 @@ with tabs[1]:
                 "Aantal": float(amount),
                 "GAK": float(avg_price),
                 "GAK (€)": float(gak_eur),
-                "Prijs": live_price,
+                "Prijs": display_price,
                 "Waarde (€)": val_eur,
                 "Winst (€)": profit_eur,
                 "Div/Jaar (€)": yearly_div_eur,
@@ -686,12 +736,16 @@ with tabs[1]:
                 "Sector": sector,
                 "Valuta": symbol,
                 "_currency_code": currency,
-                "_rate": eur_rate, # Nodig voor terugrekenen GAK
+                "_rate": eur_rate, 
                 "Verwijder": False
             })
             
         progress_bar.empty()
         
+        # WAARSCHUWING BIJ FOUTEN (RATE LIMIT)
+        if failed_tickers:
+            st.warning(f"⚠️ Yahoo kon data niet ophalen voor: {', '.join(failed_tickers)}. Waarde tijdelijk op €0. Wacht even en herlaad.")
+
         # Sorteer op Totale Waarde
         portfolio_data.sort(key=lambda x: x["Waarde (€)"], reverse=True)
 
@@ -699,6 +753,7 @@ with tabs[1]:
         # SECTIE 1: Overzicht (Metrics & Cijfers)
         # ---------------------------
         with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
+            # KPI's
             k1, k2, k3, k4, k5, k6 = st.columns(6)
             
             abs_profit = total_val_eur - total_cost_eur
@@ -714,6 +769,7 @@ with tabs[1]:
             
             st.divider()
 
+            # ETF vs Aandelen & Sectoren
             comp1, comp2 = st.columns(2)
             with comp1:
                 st.markdown("**Verdeling: Aandelen vs ETF's**")
@@ -781,33 +837,43 @@ with tabs[1]:
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
             }
             
-            # De FIX: We vangen het 'event' op, dit is GEEN DataFrame meer in nieuwere Streamlit versies
-            editor_event = st.data_editor(
-                df_editor_source, 
-                column_config=column_settings, 
-                column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
-                hide_index=True, 
-                use_container_width=True, 
-                key="main_portfolio_editor",
-                on_select="rerun",  # Dit zorgt voor de klik-actie
-                selection_mode="single-row"
-            )
-
-            # Haal de data uit het event object
-            edited_df = editor_event.data
+            # FIX: ROBUUSTE TABEL LOGICA (TRY/EXCEPT)
+            # Dit voorkomt de crash bij oudere Streamlit versies
+            try:
+                # Poging 1: Moderne tabel met klikfunctie
+                event = st.data_editor(
+                    df_editor_source, 
+                    column_config=column_settings, 
+                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
+                    hide_index=True, 
+                    use_container_width=True, 
+                    key="main_portfolio_editor",
+                    on_select="rerun",  # Mogelijke crash oorzaak
+                    selection_mode="single-row"
+                )
+                edited_df = event.data
+                selection = event.selection['rows']
             
+            except TypeError:
+                # Poging 2: Fallback (als server 'on_select' niet kent)
+                st.caption("ℹ️ Veilige modus: Selecteren uitgeschakeld ivm server versie.")
+                edited_df = st.data_editor(
+                    df_editor_source, 
+                    column_config=column_settings, 
+                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
+                    hide_index=True, 
+                    use_container_width=True, 
+                    key="fallback_portfolio_editor"
+                )
+                selection = []
+
             # Update Logic (Inclusief GAK € editing)
             if not df_editor_source.equals(edited_df):
                 new_state_portfolio = []
                 for index, row in edited_df.iterrows():
                     if not row['Verwijder']:
                         # Check of GAK (€) is veranderd door gebruiker
-                        # We halen de originele rij op om te vergelijken
-                        if index in df_editor_source.index:
-                            orig_row = df_editor_source.loc[index]
-                        else:
-                            orig_row = row 
-
+                        orig_row = df_editor_source.iloc[index] if index in df_editor_source.index else row
                         new_gak_eur = row['GAK (€)']
                         rate = row['_rate']
                         
@@ -827,11 +893,9 @@ with tabs[1]:
                 st.session_state['portfolio'] = new_state_portfolio
                 st.rerun()
 
-            # DETAIL WEERGAVE NA KLIK (Gebruik selection uit event)
-            if len(editor_event.selection['rows']) > 0:
-                selected_idx = editor_event.selection['rows'][0]
-                
-                # Veiligheidscheck index
+            # DETAIL WEERGAVE NA KLIK (Alleen als selectie werkt)
+            if len(selection) > 0:
+                selected_idx = selection[0]
                 if selected_idx < len(edited_df):
                     sel_row = edited_df.iloc[selected_idx]
                     sel_ticker = sel_row['Ticker']

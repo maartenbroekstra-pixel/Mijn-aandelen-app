@@ -15,7 +15,7 @@ import time
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# Debug: Toon versie in sidebar om zeker te zijn
+# Debug: Toon versie in sidebar
 st.sidebar.caption(f"Streamlit versie: {st.__version__}")
 
 HEADERS = {
@@ -112,21 +112,20 @@ def get_currency_rate(from_curr, to_curr="EUR"):
 
 @st.cache_data(ttl=3600)
 def get_extended_portfolio_data(ticker):
-    # FIX: Vertraging om Yahoo 'Too Many Requests' te voorkomen
+    # Vertraging om Yahoo 'Too Many Requests' te voorkomen
     time.sleep(0.3)
     
     try:
         tk = yf.Ticker(ticker)
-        # We proberen fast_info als backup als .info faalt (door rate limit)
         fast_info = tk.fast_info 
         info = tk.info
         
-        # Check validiteit data
+        # Check validiteit
         if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
              if fast_info and fast_info.last_price:
                  current_price = fast_info.last_price
                  previous_close = fast_info.previous_close
-                 # Fake info object om crashes te voorkomen
+                 # Fake info object
                  info = {
                      'quoteType': 'EQUITY', 
                      'sector': 'Onbekend', 
@@ -135,17 +134,15 @@ def get_extended_portfolio_data(ticker):
                      'longName': ticker
                  }
              else:
-                 return None # Data ophalen mislukt
+                 return None 
 
-        # 1. Type bepalen
         q_type = info.get('quoteType', 'EQUITY').upper()
         if 'ETF' in q_type: q_type = 'ETF'
         else: q_type = 'Aandeel'
             
-        # 2. Earnings Data
+        # Earnings Data
         earnings_surprise = None
         earnings_history_list = []
-        
         try:
             us_ticker = EU_TO_US_MAP.get(ticker, ticker)
             earning_tk = yf.Ticker(us_ticker)
@@ -190,7 +187,7 @@ def get_extended_portfolio_data(ticker):
         except Exception:
             pass
 
-        # 3. Dividend
+        # Dividend
         dividend_months = []
         try:
             hist = tk.dividends
@@ -204,7 +201,7 @@ def get_extended_portfolio_data(ticker):
         except Exception:
             pass
 
-        # 4. YTD Berekening
+        # YTD
         ytd_start_price = None
         current_year = datetime.now().year
         try:
@@ -608,7 +605,8 @@ with tabs[1]:
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
         
         failed_tickers = []
-        earnings_history_store = {} 
+        earnings_history_store = {}
+        ticker_details_map = {} # Mapping voor de dropdown
 
         progress_bar = st.progress(0, text="Portfolio data analyseren...")
         
@@ -719,10 +717,16 @@ with tabs[1]:
                 display_price = 0.0
                 earnings_str = "⚠️ ERROR"
 
+            # Mapping opslaan voor de dropdown details
+            ticker_details_map[ticker] = {
+                'shortName': short_name,
+                'longName': long_name,
+                'status': 'Error' if data_failed else 'OK'
+            }
+
             portfolio_data.append({
                 "Ticker": ticker,
                 "Naam": short_name,
-                "LangeNaam": long_name,
                 "Type": q_type,
                 "Aantal": float(amount),
                 "GAK": float(avg_price),
@@ -742,7 +746,6 @@ with tabs[1]:
             
         progress_bar.empty()
         
-        # WAARSCHUWING BIJ FOUTEN (RATE LIMIT)
         if failed_tickers:
             st.warning(f"⚠️ Yahoo kon data niet ophalen voor: {', '.join(failed_tickers)}. Waarde tijdelijk op €0. Wacht even en herlaad.")
 
@@ -750,12 +753,10 @@ with tabs[1]:
         portfolio_data.sort(key=lambda x: x["Waarde (€)"], reverse=True)
 
         # ---------------------------
-        # SECTIE 1: Overzicht (Metrics & Cijfers)
+        # SECTIE 1: Overzicht
         # ---------------------------
         with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
-            # KPI's
             k1, k2, k3, k4, k5, k6 = st.columns(6)
-            
             abs_profit = total_val_eur - total_cost_eur
             pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
             yield_pct = (total_div_eur / total_val_eur * 100) if total_val_eur else 0
@@ -763,13 +764,12 @@ with tabs[1]:
             k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
             k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
             k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-            k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan", help="Winst/verlies op basis van koersverschil 1 jan vs nu.")
+            k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
             k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
             k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
             
             st.divider()
 
-            # ETF vs Aandelen & Sectoren
             comp1, comp2 = st.columns(2)
             with comp1:
                 st.markdown("**Verdeling: Aandelen vs ETF's**")
@@ -778,7 +778,6 @@ with tabs[1]:
                 c_a, c_b = st.columns(2)
                 c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
                 c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
-                
                 fig_dist = px.pie(names=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=0.5, color_discrete_sequence=['#3498db', '#e74c3c'])
                 fig_dist.update_layout(height=250, margin=dict(t=0, b=0, l=0, r=0))
                 st.plotly_chart(fig_dist, use_container_width=True)
@@ -817,10 +816,10 @@ with tabs[1]:
                     st.plotly_chart(fig_bar, use_container_width=True)
 
         # ---------------------------
-        # SECTIE 3: Aandelen Tabel & Details (Clickable)
+        # SECTIE 3: Aandelen Tabel & Details (Dropdown)
         # ---------------------------
         with st.expander("📋 Aandelen & Details", expanded=True):
-            st.info("💡 Klik op een rij in de tabel om Earnings Grafiek & Nieuws te zien.")
+            st.info("💡 Bewerk 'GAK (€)' of 'Aantal' in de tabel. Selecteer een aandeel daaronder voor details.")
             
             df_editor_source = pd.DataFrame(portfolio_data)
             column_settings = {
@@ -837,47 +836,25 @@ with tabs[1]:
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
             }
             
-            # FIX: ROBUUSTE TABEL LOGICA (TRY/EXCEPT)
-            # Dit voorkomt de crash bij oudere Streamlit versies
-            try:
-                # Poging 1: Moderne tabel met klikfunctie
-                event = st.data_editor(
-                    df_editor_source, 
-                    column_config=column_settings, 
-                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
-                    hide_index=True, 
-                    use_container_width=True, 
-                    key="main_portfolio_editor",
-                    on_select="rerun",  # Mogelijke crash oorzaak
-                    selection_mode="single-row"
-                )
-                edited_df = event.data
-                selection = event.selection['rows']
-            
-            except TypeError:
-                # Poging 2: Fallback (als server 'on_select' niet kent)
-                st.caption("ℹ️ Veilige modus: Selecteren uitgeschakeld ivm server versie.")
-                edited_df = st.data_editor(
-                    df_editor_source, 
-                    column_config=column_settings, 
-                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
-                    hide_index=True, 
-                    use_container_width=True, 
-                    key="fallback_portfolio_editor"
-                )
-                selection = []
+            # STABIELE TABEL (Geen on_select, dus geen crash)
+            edited_df = st.data_editor(
+                df_editor_source, 
+                column_config=column_settings, 
+                column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
+                hide_index=True, 
+                use_container_width=True, 
+                key="main_portfolio_editor"
+            )
 
             # Update Logic (Inclusief GAK € editing)
             if not df_editor_source.equals(edited_df):
                 new_state_portfolio = []
                 for index, row in edited_df.iterrows():
                     if not row['Verwijder']:
-                        # Check of GAK (€) is veranderd door gebruiker
                         orig_row = df_editor_source.iloc[index] if index in df_editor_source.index else row
                         new_gak_eur = row['GAK (€)']
                         rate = row['_rate']
                         
-                        # Als GAK € is aangepast, herbereken native GAK
                         if abs(new_gak_eur - orig_row['GAK (€)']) > 0.001:
                              new_avg_price = new_gak_eur / rate if rate > 0 else new_gak_eur
                         else:
@@ -893,22 +870,26 @@ with tabs[1]:
                 st.session_state['portfolio'] = new_state_portfolio
                 st.rerun()
 
-            # DETAIL WEERGAVE NA KLIK (Alleen als selectie werkt)
-            if len(selection) > 0:
-                selected_idx = selection[0]
-                if selected_idx < len(edited_df):
-                    sel_row = edited_df.iloc[selected_idx]
-                    sel_ticker = sel_row['Ticker']
-                    sel_name = sel_row['LangeNaam']
-
-                    st.markdown(f"#### 🔎 Details: {sel_name} ({sel_ticker})")
+            # DETAIL SELECTIE (FILTER)
+            st.divider()
+            st.subheader("🔎 Details per Aandeel")
+            
+            # Lijst voor dropdown
+            available_tickers = [item['Ticker'] for item in portfolio_data]
+            
+            if available_tickers:
+                selected_ticker = st.selectbox("Selecteer een aandeel:", available_tickers)
+                
+                if selected_ticker:
+                    sel_info = ticker_details_map.get(selected_ticker, {})
+                    long_name = sel_info.get('longName', selected_ticker)
                     
                     d1, d2 = st.columns([2, 1])
                     
                     with d1:
-                        if sel_ticker in earnings_history_store:
-                            st.markdown("**Earnings Surprise Historie**")
-                            hist_data = earnings_history_store[sel_ticker]
+                        if selected_ticker in earnings_history_store:
+                            st.markdown(f"**Earnings Surprise: {long_name}**")
+                            hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
                             
                             fig_eps = go.Figure()
@@ -920,8 +901,8 @@ with tabs[1]:
                             st.info("Geen surprise grafiek data beschikbaar.")
                     
                     with d2:
-                        st.markdown("**Laatste Earnings Nieuws**")
-                        query = f"{sel_name} earnings stock news"
+                        st.markdown(f"**Laatste Nieuws: {long_name}**")
+                        query = f"{long_name} earnings stock news"
                         news = get_google_news(query)
                         if news:
                             for n in news:
@@ -965,7 +946,7 @@ with tabs[1]:
             st.rerun()
 
 # --------------------------------------------------
-# TAB 3 & 4 (Ongewijzigd)
+# TAB 3 & 4
 # --------------------------------------------------
 with tabs[2]:
     st.subheader("❤️ Mijn Wishlist")

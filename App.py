@@ -11,6 +11,14 @@ from datetime import datetime, timedelta
 import time
 import streamlit_authenticator as stauth # NIEUW: Voor inloggen
 
+# --- TIJDELIJKE WACHTWOORD GENERATOR ---
+# Verwijder dit blok nadat je de hash hebt gekopieerd!
+pass_to_hash = ["JouwGeheimeWachtwoord123"] # <--- Vul hier je gewenste wachtwoord in
+hashed_ww = stauth.Hasher(pass_to_hash).generate()
+st.write("Jouw gehashte wachtwoord is:")
+st.code(hashed_ww[0], language='text')
+# ---------------------------------------
+
 # ==================================================
 # 1. CONFIGURATIE & AUTHENTICATIE
 # ==================================================

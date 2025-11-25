@@ -221,39 +221,79 @@ def get_extended_portfolio_data(ticker):
             earnings_history_list = earnings_data['earnings_history']
             earnings_surprise = earnings_data['last_surprise']
         else:
-            # Verbeterde Yahoo Fallback
+            # 1. Probeer Yahoo 'Analysis' History (Komt overeen met jouw link)
+            # Dit haalt de 'Earnings History' tabel op (Est, Actual, Surprise)
             try:
-                # We proberen eerst de US ticker, dan de originele
-                tickers_to_try = [EU_TO_US_MAP.get(ticker), ticker]
-                tickers_to_try = [t for t in tickers_to_try if t] # filter None
-
-                for t_try in tickers_to_try:
-                    earning_tk = yf.Ticker(t_try)
-                    dates = earning_tk.earnings_dates
+                # We proberen de directe Analysis data
+                analysis_hist = tk.earnings_history
+                if analysis_hist is not None and not analysis_hist.empty:
+                    # Sorteer op datum (index)
+                    analysis_hist = analysis_hist.sort_index()
+                    # Pak laatste 4
+                    recent = analysis_hist.tail(4)
                     
-                    if dates is not None and not dates.empty:
-                        if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
-                        now = datetime.now()
-                        past_dates = dates[dates.index < now].sort_index(ascending=False)
-                        
-                        # Zoek rijen waar zowel Reported als Estimate bekend zijn
-                        valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
-                        
-                        if not valid.empty:
-                            for date, row in valid.iterrows():
-                                 earnings_history_list.append({
-                                     'date': date.strftime('%Y-%m-%d'),
-                                     'reported': row['Reported EPS'],
-                                     'estimate': row['EPS Estimate'],
-                                     'surprise': row['Surprise(%)'] * 100 if abs(row['Surprise(%)']) < 5 else row['Surprise(%)'] # Yahoo geeft soms fracties, soms %
-                                 })
-                            
-                            earnings_history_list.reverse()
-                            if earnings_history_list:
-                                last = earnings_history_list[-1]
-                                earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
-                            break # Als we data hebben, stoppen we met zoeken
+                    for date, row in recent.iterrows():
+                        # Kolommen checken (Yahoo verandert dit soms)
+                        est = row.get('EPS Est.') or row.get('epsEstimate')
+                        rep = row.get('EPS Actual') or row.get('epsActual')
+                        surp_pct = row.get('Surprise %') or row.get('surprisePercent')
+
+                        if est is not None and rep is not None:
+                             # Datum formatting
+                             date_str = date.strftime('%Y-%m-%d')
+                             
+                             # Surprise normaliseren (soms decimaal, soms %)
+                             if surp_pct is not None:
+                                 if abs(surp_pct) < 1.0 and surp_pct != 0: 
+                                     surp_pct = surp_pct * 100
+                             else:
+                                 surp_pct = ((rep - est) / abs(est) * 100) if est != 0 else 0
+                                 
+                             earnings_history_list.append({
+                                 'date': date_str,
+                                 'reported': float(rep),
+                                 'estimate': float(est),
+                                 'surprise': float(surp_pct)
+                             })
+                    
+                    # Als we data hebben via Analysis, gebruiken we die
+                    if earnings_history_list:
+                        last = earnings_history_list[-1]
+                        earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
+            
             except: pass
+            
+            # 2. Fallback: Als Analysis faalt, probeer Earnings Dates (Oudere methode)
+            if not earnings_history_list:
+                try:
+                    tickers_to_try = [EU_TO_US_MAP.get(ticker), ticker]
+                    tickers_to_try = [t for t in tickers_to_try if t] 
+
+                    for t_try in tickers_to_try:
+                        earning_tk = yf.Ticker(t_try)
+                        dates = earning_tk.earnings_dates
+                        
+                        if dates is not None and not dates.empty:
+                            if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
+                            now = datetime.now()
+                            past_dates = dates[dates.index < now].sort_index(ascending=False)
+                            valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
+                            
+                            if not valid.empty:
+                                for date, row in valid.iterrows():
+                                     earnings_history_list.append({
+                                         'date': date.strftime('%Y-%m-%d'),
+                                         'reported': row['Reported EPS'],
+                                         'estimate': row['EPS Estimate'],
+                                         'surprise': row['Surprise(%)'] * 100 if abs(row['Surprise(%)']) < 5 else row['Surprise(%)']
+                                     })
+                                
+                                earnings_history_list.reverse()
+                                if earnings_history_list:
+                                    last = earnings_history_list[-1]
+                                    earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
+                                break 
+                except: pass
 
         dividend_months = []
         try:
@@ -277,7 +317,7 @@ def get_extended_portfolio_data(ticker):
 
         current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
         previous_close = info.get('regularMarketPreviousClose')
-        target_price = info.get('targetMeanPrice') # Ophalen koersdoel
+        target_price = info.get('targetMeanPrice')
 
         if not current_price:
              try: current_price = tk.fast_info.last_price
@@ -671,7 +711,7 @@ with tabs[1]:
         total_div_eur = 0
         total_day_change_eur = 0
         total_year_change_eur = 0
-        total_potential_eur = 0 # Nieuwe variabele voor potentiële waarde
+        total_potential_eur = 0
 
         etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
         stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
@@ -709,7 +749,7 @@ with tabs[1]:
 
             # Data extractie
             live_price = ext_data.get('live_price', 0)
-            target_price = ext_data.get('target_price') # Kan None zijn
+            target_price = ext_data.get('target_price') 
             if live_price is None: live_price = 0
             
             q_type = ext_data.get('type', 'Aandeel')
@@ -729,7 +769,6 @@ with tabs[1]:
             cost_eur = cost_native * eur_rate
             profit_eur = val_eur - cost_eur
             
-            # Potentiële waarde berekening (gebruik target indien beschikbaar, anders current)
             used_target = target_price if target_price else live_price
             potential_eur = used_target * amount * eur_rate
             total_potential_eur += potential_eur
@@ -837,7 +876,6 @@ with tabs[1]:
         # SECTIE 1: Overzicht
         # ---------------------------
         with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
-            # AANGEPAST: 7 kolommen nu om Potentiële Waarde toe te voegen
             k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
             abs_profit = total_val_eur - total_cost_eur
             pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
@@ -980,10 +1018,17 @@ with tabs[1]:
             st.divider()
             st.subheader("🔎 Details per Aandeel")
             
+            # Map namen naar tickers voor de dropdown
             available_tickers = [item['Ticker'] for item in portfolio_data]
+            ticker_to_name = {item['Ticker']: item['Naam'] for item in portfolio_data}
             
             if available_tickers:
-                selected_ticker = st.selectbox("Selecteer een aandeel:", available_tickers)
+                # AANGEPAST: Dropdown toont nu "Bedrijfsnaam (Ticker)" ipv alleen Ticker
+                selected_ticker = st.selectbox(
+                    "Selecteer een aandeel:", 
+                    available_tickers,
+                    format_func=lambda x: f"{ticker_to_name.get(x, x)} ({x})"
+                )
                 
                 if selected_ticker:
                     sel_info = ticker_details_map.get(selected_ticker, {})
@@ -991,7 +1036,7 @@ with tabs[1]:
                     
                     if selected_ticker in earnings_history_store:
                         st.markdown(f"**Earnings Surprise: {long_name}**")
-                        st.caption("Bron: Nasdaq / Yahoo")
+                        st.caption("Bron: Nasdaq / Yahoo Analysis")
                         hist_data = earnings_history_store[selected_ticker]
                         df_eps = pd.DataFrame(hist_data)
                         

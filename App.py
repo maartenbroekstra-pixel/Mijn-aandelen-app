@@ -54,11 +54,20 @@ TOOLTIPS = {
 
 DEFAULT_PORTFOLIO = []
 
+# Modern, "Flashy" kleurenpalet voor sectoren
 SECTOR_COLORS = {
-    "Technology": "#1f77b4", "Financial Services": "#ff7f0e", "Healthcare": "#2ca02c",
-    "Consumer Cyclical": "#d62728", "Industrials": "#9467bd", "Consumer Defensive": "#8c564b",
-    "Energy": "#e377c2", "Communication Services": "#7f7f7f", "Real Estate": "#bcbd22",
-    "Basic Materials": "#17becf", "Utilities": "#aec7e8", "ETF/Overig": "#ffbb78"
+    "Technology": "#00E5FF",          # Cyaan
+    "Financial Services": "#2979FF",  # Helder Blauw
+    "Healthcare": "#00E676",          # Neon Groen
+    "Consumer Cyclical": "#FF1744",   # Fel Rood
+    "Industrials": "#651FFF",         # Diep Paars
+    "Consumer Defensive": "#FF9100",  # Oranje
+    "Energy": "#FFEA00",              # Fel Geel
+    "Communication Services": "#D500F9", # Neon Roze
+    "Real Estate": "#8D6E63",         # Bruin-Grijs
+    "Basic Materials": "#00B0FF",     # Lichtblauw
+    "Utilities": "#76FF03",           # Lime
+    "ETF/Overig": "#B0BEC5"           # Grijs
 }
 
 # ==================================================
@@ -576,7 +585,25 @@ with tabs[0]:
             with col_chart:
                 hist_data = engine.yf_obj.history(period=chart_period)
                 if not hist_data.empty:
-                    fig = px.area(hist_data, x=hist_data.index, y='Close', title=f"Koersverloop ({chart_period})")
+                    # FLASHY LINE CHART (Spline + Gradient + No Grid)
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=hist_data.index, 
+                        y=hist_data['Close'], 
+                        mode='lines', 
+                        name='Koers',
+                        line=dict(color='#00F0FF', width=2, shape='spline'), # Neon blauw, vloeiend
+                        fill='tozeroy',
+                        fillcolor='rgba(0, 240, 255, 0.1)' # Transparante glow
+                    ))
+                    fig.update_layout(
+                        title=f"Koersverloop ({chart_period})",
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(showgrid=False, color='#888'),
+                        yaxis=dict(showgrid=False, color='#888'),
+                        hovermode='x unified'
+                    )
                     st.plotly_chart(fig, use_container_width=True)
             with col_news:
                 st.markdown("##### 📰 Earnings & Nieuws")
@@ -825,19 +852,31 @@ with tabs[1]:
                 c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
                 c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
                 
-                # MOOIE DONUT CHART 1
-                fig_d1 = go.Figure(data=[go.Pie(labels=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=.6)])
-                fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=['#3498db', '#e74c3c']))
-                fig_d1.update_layout(showlegend=True, height=300, margin=dict(t=0, b=0, l=0, r=0))
+                # FLASHY DONUT CHART 1
+                fig_d1 = go.Figure(data=[go.Pie(labels=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=.7)])
+                fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=['#00E5FF', '#FF1744']))
+                fig_d1.update_layout(
+                    showlegend=True, 
+                    height=300, 
+                    margin=dict(t=0, b=0, l=0, r=0),
+                    plot_bgcolor='rgba(0,0,0,0)', 
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
                 st.plotly_chart(fig_d1, use_container_width=True)
 
             with comp2:
                 st.markdown("**Sectoren**")
                 if sector_distribution:
-                    # MOOIE DONUT CHART 2
-                    fig_d2 = go.Figure(data=[go.Pie(labels=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=.6)])
+                    # FLASHY DONUT CHART 2
+                    fig_d2 = go.Figure(data=[go.Pie(labels=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=.7)])
                     fig_d2.update_traces(textinfo='percent', marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
-                    fig_d2.update_layout(showlegend=True, height=300, margin=dict(t=0, b=0, l=0, r=0))
+                    fig_d2.update_layout(
+                        showlegend=True, 
+                        height=300, 
+                        margin=dict(t=0, b=0, l=0, r=0),
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        paper_bgcolor='rgba(0,0,0,0)'
+                    )
                     st.plotly_chart(fig_d2, use_container_width=True)
 
         # ---------------------------
@@ -850,12 +889,16 @@ with tabs[1]:
                 if sum(monthly_vals) > 0:
                     st.markdown("**Maandelijks Dividend Projectie**")
                     months = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"]
-                    df_divs = pd.DataFrame({'Maand': months, 'Dividend (€)': monthly_vals})
-                    
-                    # MOOIE BAR CHART
-                    fig_bar = px.bar(df_divs, x='Maand', y='Dividend (€)', text_auto='.2s')
-                    fig_bar.update_traces(marker_color='#2ecc71')
-                    fig_bar.update_layout(height=300)
+                    # FLASHY BAR CHART
+                    fig_bar = go.Figure([go.Bar(x=months, y=monthly_vals, marker_color='#76FF03')])
+                    fig_bar.update_layout(
+                        height=300, 
+                        margin=dict(t=10, b=10, l=0, r=0), 
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(showgrid=False),
+                        yaxis=dict(showgrid=True, gridcolor='#333')
+                    )
                     st.plotly_chart(fig_bar, use_container_width=True)
                 else:
                     st.info("Geen gedetailleerde uitbetalingsdata beschikbaar.")
@@ -865,7 +908,7 @@ with tabs[1]:
                 if not df_charts.empty:
                     df_charts = df_charts.sort_values(by="Div/Jaar (€)", ascending=False)
                     fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', color_discrete_map=SECTOR_COLORS)
-                    fig_bar.update_layout(height=300)
+                    fig_bar.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
                     st.plotly_chart(fig_bar, use_container_width=True)
 
         # ---------------------------
@@ -954,7 +997,7 @@ with tabs[1]:
                                 y=df_eps['estimate'], 
                                 name='Verwacht', 
                                 mode='markers',
-                                marker=dict(color='#a5d8ff', size=15, symbol='circle')
+                                marker=dict(color='#90CAF9', size=15, symbol='circle')
                             ))
                             
                             # Werkelijk (Donkerblauw)
@@ -963,7 +1006,7 @@ with tabs[1]:
                                 y=df_eps['reported'], 
                                 name='Werkelijk', 
                                 mode='markers',
-                                marker=dict(color='#448aff', size=15, symbol='circle')
+                                marker=dict(color='#2962FF', size=15, symbol='circle')
                             ))
                             
                             fig_eps.update_layout(
@@ -971,23 +1014,29 @@ with tabs[1]:
                                 yaxis_title="EPS", 
                                 height=300, 
                                 margin=dict(t=30, b=0, l=0, r=0),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                                plot_bgcolor='rgba(0,0,0,0)', 
+                                paper_bgcolor='rgba(0,0,0,0)'
                             )
-                            fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
+                            fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#444')
+                            fig_eps.update_xaxes(showgrid=False)
                             st.plotly_chart(fig_eps, use_container_width=True)
                             
-                            # METRICS ONDER DE GRAFIEK
+                            # METRICS ONDER DE GRAFIEK (2x2 Grid)
                             latest = df_eps.iloc[-1] # Laatste datapunt
                             est = latest['estimate']
                             rep = latest['reported']
                             diff = rep - est
                             pct = latest['surprise']
                             
-                            m1, m2, m3, m4 = st.columns(4)
-                            m1.metric("Verwacht EPS", f"{est:.2f}", delta_color="off")
-                            m2.metric("Werkelijk EPS", f"{rep:.2f}", delta_color="off")
-                            m3.metric("Verschil EPS", f"{diff:+.2f}")
-                            m4.metric("Verschil %", f"{pct:+.1f}%", delta_color="normal")
+                            # 2x2 Layout
+                            r1_c1, r1_c2 = st.columns(2)
+                            r2_c1, r2_c2 = st.columns(2)
+                            
+                            r1_c1.metric("Verwacht EPS", f"{est:.2f}")
+                            r1_c2.metric("Werkelijk EPS", f"{rep:.2f}")
+                            r2_c1.metric("Verschil", f"{diff:+.2f}")
+                            r2_c2.metric("Surprise %", f"{pct:+.1f}%", delta=pct, delta_color="normal")
 
                         else:
                             st.info("Geen earnings historie gevonden.")

@@ -199,10 +199,13 @@ elif st.session_state["authentication_status"]:
                 rows = data['data']['earningsSurpriseTable'].get('rows', [])
                 history = []
                 
-                for row in rows[:4]: 
+                for row in rows: 
                     try:
                         date_str = row.get('dateReported')
                         if not date_str: continue
+
+                        # Parse datum voor sortering
+                        dt = pd.to_datetime(date_str, errors='coerce')
                         
                         eps_rep = row.get('eps')
                         eps_est = row.get('consensusForecast')
@@ -213,6 +216,7 @@ elif st.session_state["authentication_status"]:
                         val_est = float(str(eps_est).replace('$', '').replace(',', ''))
                         
                         history.append({
+                            'dt': dt,
                             'date': date_str,
                             'reported': val_rep,
                             'estimate': val_est,
@@ -221,8 +225,16 @@ elif st.session_state["authentication_status"]:
                     except:
                         continue
                 
+                # Sorteer op datum: Nieuwste eerst
+                history.sort(key=lambda x: x['dt'], reverse=True)
+                
+                # Pak top 4
+                history = history[:4]
+
+                # Reverse terug naar Oud -> Nieuw voor grafiek weergave
+                history.reverse()
+                
                 if history:
-                    history.reverse()
                     last = history[-1]
                     return {
                         'earnings_history': history,
@@ -239,22 +251,18 @@ elif st.session_state["authentication_status"]:
     def scrape_yahoo_analysis_html(ticker):
         """
         Verbeterde scraper voor Yahoo Earnings History.
-        Probeert correcte tabellen (zowel verticaal als horizontaal) te herkennen
-        om verkeerde 'misses' te voorkomen.
+        Parseert datums, filtert oude data (max 2 jaar) en limiteert tot 4 kwartalen.
         """
         try:
             url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
             dfs = pd.read_html(url, storage_options={'User-Agent': HEADERS['User-Agent']})
-            history = []
+            raw_history = []
             
             for df in dfs:
-                # Normaliseer kolomnamen
                 cols = [str(c).lower().replace('.', '') for c in df.columns]
                 
                 # Check 1: Verticale Tabel (Earnings History) - Standaard formaat
-                # Zoekt naar kolommen als 'earnings date', 'eps est', 'eps actual'
                 if any('eps est' in c for c in cols) and any('eps actual' in c for c in cols):
-                    # Map de juiste kolom indexen
                     date_col = next((i for i, c in enumerate(cols) if 'date' in c), 0)
                     est_col = next((i for i, c in enumerate(cols) if 'eps est' in c), None)
                     act_col = next((i for i, c in enumerate(cols) if 'eps actual' in c), None)
@@ -263,37 +271,34 @@ elif st.session_state["authentication_status"]:
                     if est_col is not None and act_col is not None:
                         for idx, row in df.iterrows():
                             try:
-                                est_val = row.iloc[est_col]
                                 act_val = row.iloc[act_col]
-                                date_val = row.iloc[date_col]
-                                surp_val = row.iloc[surp_col] if surp_col is not None else 0
-
-                                # Schoonmaken
                                 if pd.isna(act_val) or str(act_val).strip() == '-': continue
                                 
-                                act_clean = float(str(act_val))
-                                est_clean = float(str(est_val))
-                                
-                                # Surprise percentage reinigen (bv. "+10.5%" -> 10.5)
-                                if isinstance(surp_val, str):
-                                    surp_clean = float(surp_val.replace('%', '').replace(',', ''))
-                                else:
-                                    surp_clean = float(surp_val)
+                                # Datum parsen
+                                date_str = str(row.iloc[date_col])
+                                dt = pd.to_datetime(date_str, errors='coerce')
 
-                                history.append({
-                                    'date': str(date_val),
-                                    'reported': act_clean,
-                                    'estimate': est_clean,
-                                    'surprise': surp_clean
+                                est_val = float(str(row.iloc[est_col]))
+                                act_val = float(str(act_val))
+                                
+                                surp_val = row.iloc[surp_col] if surp_col is not None else 0
+                                if isinstance(surp_val, str):
+                                    surp_val = float(surp_val.replace('%', '').replace(',', ''))
+                                else:
+                                    surp_val = float(surp_val)
+
+                                raw_history.append({
+                                    'dt': dt,
+                                    'date': date_str,
+                                    'reported': act_val,
+                                    'estimate': est_val,
+                                    'surprise': surp_val
                                 })
                             except: continue
-                        if history: return history  # Als we data vinden, return direct
 
                 # Check 2: Horizontale Tabel (Oude stijl of alternatieve view)
-                # Als de tabel getransponeerd is (Labels in eerste kolom)
                 s_df = df.astype(str)
                 if s_df.apply(lambda x: x.str.contains('EPS Est', case=False)).any().any():
-                    # Probeer te pivoten of horizontaal te lezen
                     try:
                         df.set_index(df.columns[0], inplace=True)
                         est_row = df.loc[df.index.str.contains("EPS Est", case=False, na=False)].iloc[0]
@@ -304,11 +309,13 @@ elif st.session_state["authentication_status"]:
                         if surp_row_matches.any():
                             surp_row = df.loc[surp_row_matches].iloc[0]
 
-                        temp_history = []
                         for col_date in df.columns:
                             try:
-                                est_val = float(est_row[col_date])
                                 act_val = float(act_row[col_date])
+                                if pd.isna(act_val): continue
+
+                                est_val = float(est_row[col_date])
+                                dt = pd.to_datetime(str(col_date), errors='coerce')
                                 
                                 surp_val = 0.0
                                 if surp_row is not None:
@@ -316,18 +323,36 @@ elif st.session_state["authentication_status"]:
                                     if raw_surp != '-' and raw_surp != 'N/A':
                                         surp_val = float(raw_surp)
                                 
-                                if not pd.isna(act_val):
-                                    temp_history.append({
-                                        'date': col_date,
-                                        'reported': act_val,
-                                        'estimate': est_val,
-                                        'surprise': surp_val
-                                    })
+                                raw_history.append({
+                                    'dt': dt,
+                                    'date': str(col_date),
+                                    'reported': act_val,
+                                    'estimate': est_val,
+                                    'surprise': surp_val
+                                })
                             except: continue
-                        if temp_history: return temp_history
                     except: pass
-                    
-            return history
+            
+            # --- FILTER EN SORTEER LOGICA ---
+            if raw_history:
+                # 1. Verwijder rijen zonder geldige datum
+                valid_hist = [h for h in raw_history if not pd.isna(h['dt'])]
+                
+                # 2. Sorteer op datum: Nieuwste eerst
+                valid_hist.sort(key=lambda x: x['dt'], reverse=True)
+                
+                # 3. Filter data ouder dan 2 jaar (730 dagen) om 2001-toestanden te voorkomen
+                cutoff_date = datetime.now() - timedelta(days=730)
+                recent_hist = [h for h in valid_hist if h['dt'] > cutoff_date]
+                
+                # 4. Pak maximaal de laatste 4
+                final_slice = recent_hist[:4]
+                
+                # 5. Reverse terug (Oud -> Nieuw) voor correcte grafiek
+                final_slice.reverse()
+                
+                return final_slice
+
         except Exception:
             pass
         return []
@@ -371,14 +396,10 @@ elif st.session_state["authentication_status"]:
                     
                     if scraped_hist:
                         earnings_history_list = scraped_hist
-                        # Sorteer op datum indien nodig, maar meestal staat laatste vooraan of achteraan.
-                        # We nemen aan dat de lijst chronologisch of omgekeerd is. We willen de meest recente.
-                        # Yahoo geeft meestal links (recent) naar rechts (oud) of boven (recent).
-                        # We pakken het element met datum het dichtst bij vandaag.
-                        # Simpelheidshalve: pak laatste uit lijst als lijst chronologisch is opgebouwd in scraper.
-                        # Echter, scraper appendt. 
-                        last = earnings_history_list[0] # Vaak is de eerste rij de meest recente in tabellen
-                        earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
+                        # Lijst is nu Oud -> Nieuw door de logica in scrape_yahoo_analysis_html
+                        if earnings_history_list:
+                            last = earnings_history_list[-1] 
+                            earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
                 except: pass
 
                 if not earnings_history_list:
@@ -1003,7 +1024,7 @@ elif st.session_state["authentication_status"]:
                 k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
                 k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
                 
-                # AANGEPAST: Percentage in plaats van bedrag in de delta
+                # AANGEPAST: Delta is nu het daadwerkelijke bedrag, zodat kleur/pijl klopt
                 ytd_start_value = total_val_eur - total_year_change_eur
                 ytd_pct = (total_year_change_eur / ytd_start_value * 100) if ytd_start_value != 0 else 0.0
                 k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta=f"{ytd_pct:.2f}%")

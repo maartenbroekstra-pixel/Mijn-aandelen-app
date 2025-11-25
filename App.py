@@ -710,7 +710,7 @@ with tabs[1]:
                 if ext_data.get('previous_close'):
                     total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                 
-                # 2. YTD (Sinds 1 Jan) - TERUGGEZET
+                # 2. YTD (Sinds 1 Jan)
                 if ext_data.get('ytd_start_price'):
                      total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
 
@@ -791,6 +791,10 @@ with tabs[1]:
         if failed_tickers:
             st.warning(f"⚠️ Yahoo kon data niet ophalen voor: {', '.join(failed_tickers)}. Waarde tijdelijk op €0.")
 
+        # Weging berekenen
+        for p in portfolio_data:
+            p['Weging'] = (p['Waarde (€)'] / total_val_eur * 100) if total_val_eur > 0 else 0
+
         # Sorteer op Totale Waarde
         portfolio_data.sort(key=lambda x: x["Waarde (€)"], reverse=True)
 
@@ -806,7 +810,6 @@ with tabs[1]:
             k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
             k2.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
             k3.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
-            # YTD METRIC TERUGGEZET
             k4.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta="Sinds 1 Jan")
             k5.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
             k6.metric("Portfolio Yield", f"{yield_pct:.2f}%")
@@ -821,16 +824,21 @@ with tabs[1]:
                 c_a, c_b = st.columns(2)
                 c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
                 c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
-                fig_dist = px.pie(names=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=0.5, color_discrete_sequence=['#3498db', '#e74c3c'])
-                fig_dist.update_layout(height=250, margin=dict(t=0, b=0, l=0, r=0))
-                st.plotly_chart(fig_dist, use_container_width=True)
+                
+                # MOOIE DONUT CHART 1
+                fig_d1 = go.Figure(data=[go.Pie(labels=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=.6)])
+                fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=['#3498db', '#e74c3c']))
+                fig_d1.update_layout(showlegend=True, height=300, margin=dict(t=0, b=0, l=0, r=0))
+                st.plotly_chart(fig_d1, use_container_width=True)
 
             with comp2:
                 st.markdown("**Sectoren**")
                 if sector_distribution:
-                    fig_pie = px.pie(names=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=0.4, color=list(sector_distribution.keys()), color_discrete_map=SECTOR_COLORS)
-                    fig_pie.update_layout(height=250, margin=dict(t=0, b=0, l=0, r=0))
-                    st.plotly_chart(fig_pie, use_container_width=True)
+                    # MOOIE DONUT CHART 2
+                    fig_d2 = go.Figure(data=[go.Pie(labels=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=.6)])
+                    fig_d2.update_traces(textinfo='percent', marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
+                    fig_d2.update_layout(showlegend=True, height=300, margin=dict(t=0, b=0, l=0, r=0))
+                    st.plotly_chart(fig_d2, use_container_width=True)
 
         # ---------------------------
         # SECTIE 2: Dividend
@@ -843,10 +851,12 @@ with tabs[1]:
                     st.markdown("**Maandelijks Dividend Projectie**")
                     months = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"]
                     df_divs = pd.DataFrame({'Maand': months, 'Dividend (€)': monthly_vals})
-                    fig_div = px.bar(df_divs, x='Maand', y='Dividend (€)', text_auto='.2s')
-                    fig_div.update_traces(marker_color='#2ecc71')
-                    fig_div.update_layout(height=300)
-                    st.plotly_chart(fig_div, use_container_width=True)
+                    
+                    # MOOIE BAR CHART
+                    fig_bar = px.bar(df_divs, x='Maand', y='Dividend (€)', text_auto='.2s')
+                    fig_bar.update_traces(marker_color='#2ecc71')
+                    fig_bar.update_layout(height=300)
+                    st.plotly_chart(fig_bar, use_container_width=True)
                 else:
                     st.info("Geen gedetailleerde uitbetalingsdata beschikbaar.")
             with col_div2:
@@ -875,6 +885,7 @@ with tabs[1]:
                 "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
                 "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
                 "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
+                "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                 "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
             }
@@ -882,7 +893,7 @@ with tabs[1]:
             edited_df = st.data_editor(
                 df_editor_source, 
                 column_config=column_settings, 
-                column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Div/Jaar (€)", "Earnings"), 
+                column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Earnings"), 
                 hide_index=True, 
                 use_container_width=True, 
                 key="main_portfolio_editor"
@@ -965,7 +976,7 @@ with tabs[1]:
                             fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGrey')
                             st.plotly_chart(fig_eps, use_container_width=True)
                             
-                            # METRICS ONDER DE GRAFIEK (Zoals in screenshot)
+                            # METRICS ONDER DE GRAFIEK
                             latest = df_eps.iloc[-1] # Laatste datapunt
                             est = latest['estimate']
                             rep = latest['reported']

@@ -11,18 +11,6 @@ from datetime import datetime, timedelta
 import time
 import streamlit_authenticator as stauth
 
-# --- TIJDELIJKE CODE OM WACHTWOORD TE GENEREREN ---
-# Plak dit onder de imports, laat de app draaien, en kopieer de code die je ziet.
-import streamlit as st
-import streamlit_authenticator as stauth
-
-# Hier vullen we 'admin' in als gewenst wachtwoord
-nieuwe_hash = stauth.Hasher(['admin']).hash()
-
-st.warning("KOPIEER DEZE CODE HIERONDER:")
-st.code(nieuwe_hash[0], language='text')
-# ---------------------------------------------------
-
 # ==================================================
 # 1. CONFIGURATIE & AUTHENTICATIE
 # ==================================================

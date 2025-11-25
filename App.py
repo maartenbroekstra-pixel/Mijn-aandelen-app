@@ -22,7 +22,6 @@ HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
 
-# Headers specifiek voor Nasdaq API om blokkades te voorkomen
 NASDAQ_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -54,20 +53,35 @@ TOOLTIPS = {
 
 DEFAULT_PORTFOLIO = []
 
-# Modern, "Flashy" kleurenpalet voor sectoren
+# ==================================================
+# KLEURENPALET: MATTE & MODERN
+# ==================================================
+# Een stijlvol, gedempt palet in plaats van neon.
+MATTE_COLORS = {
+    "blue": "#457B9D",      # Steel Blue
+    "green": "#2A9D8F",     # Jungle Green/Sage
+    "red": "#E76F51",       # Burnt Sienna/Terracotta
+    "yellow": "#E9C46A",    # Sandy Yellow/Mustard
+    "charcoal": "#264653",  # Dark Blue/Grey
+    "orange": "#F4A261",    # Sandy Orange
+    "purple": "#9B5DE5",    # Muted Purple
+    "grey": "#A8DADC"       # Powder Blue/Grey
+}
+
+# Mapping van sectoren naar het matte palet
 SECTOR_COLORS = {
-    "Technology": "#00E5FF",          # Cyaan
-    "Financial Services": "#2979FF",  # Helder Blauw
-    "Healthcare": "#00E676",          # Neon Groen
-    "Consumer Cyclical": "#FF1744",   # Fel Rood
-    "Industrials": "#651FFF",         # Diep Paars
-    "Consumer Defensive": "#FF9100",  # Oranje
-    "Energy": "#FFEA00",              # Fel Geel
-    "Communication Services": "#D500F9", # Neon Roze
-    "Real Estate": "#8D6E63",         # Bruin-Grijs
-    "Basic Materials": "#00B0FF",     # Lichtblauw
-    "Utilities": "#76FF03",           # Lime
-    "ETF/Overig": "#B0BEC5"           # Grijs
+    "Technology": MATTE_COLORS["blue"],
+    "Financial Services": MATTE_COLORS["charcoal"],
+    "Healthcare": MATTE_COLORS["green"],
+    "Consumer Cyclical": MATTE_COLORS["red"],
+    "Industrials": MATTE_COLORS["purple"],
+    "Consumer Defensive": MATTE_COLORS["orange"],
+    "Energy": MATTE_COLORS["yellow"],
+    "Communication Services": "#D62828", # Matte Deep Red
+    "Real Estate": "#8D6E63",            # Earthy Brown
+    "Basic Materials": "#5F9EA0",        # Cadet Blue
+    "Utilities": "#76FF03",              # (Behouden voor contrast of dempen naar #81C784)
+    "ETF/Overig": "#B0BEC5"              # Cool Grey
 }
 
 # ==================================================
@@ -127,16 +141,9 @@ def get_currency_rate(from_curr, to_curr="EUR"):
     except Exception:
         return 1.0
 
-# NIEUWE FUNCTIE: NASDAQ EARNINGS
 @st.cache_data(ttl=3600)
 def get_nasdaq_earnings(ticker):
-    """
-    Haalt earnings surprise data direct van de Nasdaq API.
-    Werkt het beste voor US tickers.
-    """
-    # Map EU ticker naar US (bijv HEIA.AS -> HEINY)
     us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-    # Verwijder eventuele suffixen voor de API call (AAPL.US -> AAPL)
     clean_ticker = us_ticker.split('.')[0]
     
     url = f"https://api.nasdaq.com/api/company/{clean_ticker}/earnings-surprise"
@@ -149,17 +156,14 @@ def get_nasdaq_earnings(ticker):
             rows = data['data']['earningsSurpriseTable'].get('rows', [])
             history = []
             
-            for row in rows[:4]: # Pak de laatste 4
+            for row in rows[:4]: 
                 try:
-                    # Datum parsing
                     date_str = row.get('dateReported')
                     if not date_str: continue
                     
-                    # EPS parsing (verwijder $ teken)
                     eps_rep = row.get('eps')
                     eps_est = row.get('consensusForecast')
                     
-                    # Nasdaq geeft soms "N/A"
                     if eps_rep == "N/A" or eps_est == "N/A": continue
                     
                     val_rep = float(str(eps_rep).replace('$', '').replace(',', ''))
@@ -169,18 +173,14 @@ def get_nasdaq_earnings(ticker):
                         'date': date_str,
                         'reported': val_rep,
                         'estimate': val_est,
-                        # Percentage zelf berekenen voor consistentie
                         'surprise': ((val_rep - val_est) / abs(val_est) * 100) if val_est != 0 else 0
                     })
                 except:
                     continue
             
-            # Formatteer return object
             if history:
-                # Sorteer van oud naar nieuw voor de grafiek
                 history.reverse()
                 last = history[-1]
-                
                 return {
                     'earnings_history': history,
                     'last_surprise': {
@@ -194,15 +194,12 @@ def get_nasdaq_earnings(ticker):
 
 @st.cache_data(ttl=3600)
 def get_extended_portfolio_data(ticker):
-    # Vertraging tegen blokkades
     time.sleep(0.3)
-    
     try:
         tk = yf.Ticker(ticker)
         fast_info = tk.fast_info 
         info = tk.info
         
-        # Validatie
         if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
              if fast_info and fast_info.last_price:
                  current_price = fast_info.last_price
@@ -218,9 +215,7 @@ def get_extended_portfolio_data(ticker):
         if 'ETF' in q_type: q_type = 'ETF'
         else: q_type = 'Aandeel'
             
-        # 2. Earnings: Eerst Nasdaq proberen, anders Yahoo fallback
         earnings_data = get_nasdaq_earnings(ticker)
-        
         earnings_surprise = None
         earnings_history_list = []
         
@@ -228,7 +223,6 @@ def get_extended_portfolio_data(ticker):
             earnings_history_list = earnings_data['earnings_history']
             earnings_surprise = earnings_data['last_surprise']
         else:
-            # Fallback: Yahoo Earnings (zoals eerder)
             try:
                 us_ticker = EU_TO_US_MAP.get(ticker, ticker)
                 earning_tk = yf.Ticker(us_ticker)
@@ -247,7 +241,6 @@ def get_extended_portfolio_data(ticker):
                                  'surprise': row['Surprise(%)']
                              })
                         earnings_history_list.reverse()
-                        
                         last = valid.iloc[0]
                         est = last['EPS Estimate']
                         rep = last['Reported EPS']
@@ -255,7 +248,6 @@ def get_extended_portfolio_data(ticker):
                         earnings_surprise = {'date': valid.index[0], 'surprise_pct': surp}
             except: pass
 
-        # 3. Dividend
         dividend_months = []
         try:
             hist = tk.dividends
@@ -267,7 +259,6 @@ def get_extended_portfolio_data(ticker):
                     dividend_months.append({'month': date.month, 'amount': amount})
         except: pass
 
-        # 4. YTD (Jan 1 koers)
         ytd_start_price = None
         current_year = datetime.now().year
         try:
@@ -585,23 +576,23 @@ with tabs[0]:
             with col_chart:
                 hist_data = engine.yf_obj.history(period=chart_period)
                 if not hist_data.empty:
-                    # FLASHY LINE CHART (Spline + Gradient + No Grid)
+                    # UPDATED: Matte Blue Chart
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
                         x=hist_data.index, 
                         y=hist_data['Close'], 
                         mode='lines', 
                         name='Koers',
-                        line=dict(color='#00F0FF', width=2, shape='spline'), # Neon blauw, vloeiend
+                        line=dict(color=MATTE_COLORS["blue"], width=2, shape='spline'),
                         fill='tozeroy',
-                        fillcolor='rgba(0, 240, 255, 0.1)' # Transparante glow
+                        fillcolor='rgba(69, 123, 157, 0.2)' # Matte blue transparant
                     ))
                     fig.update_layout(
                         title=f"Koersverloop ({chart_period})",
                         plot_bgcolor='rgba(0,0,0,0)', 
                         paper_bgcolor='rgba(0,0,0,0)',
-                        xaxis=dict(showgrid=False, color='#888'),
-                        yaxis=dict(showgrid=False, color='#888'),
+                        xaxis=dict(showgrid=False, color='#666'),
+                        yaxis=dict(showgrid=False, color='#666'),
                         hovermode='x unified'
                     )
                     st.plotly_chart(fig, use_container_width=True)
@@ -778,10 +769,10 @@ with tabs[1]:
                     surp = ext_data['earnings']['surprise_pct']
                     if surp > 0:
                         earnings_str = f"Beat: +{surp:.1f}%"
-                        earnings_color = "green"
+                        earnings_color = MATTE_COLORS["green"]
                     else:
                         earnings_str = f"Miss: {surp:.1f}%"
-                        earnings_color = "red"
+                        earnings_color = MATTE_COLORS["red"]
             
             display_price = live_price
             if data_failed:
@@ -852,9 +843,9 @@ with tabs[1]:
                 c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
                 c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
                 
-                # FLASHY DONUT CHART 1
+                # UPDATED: Matte Donut Chart
                 fig_d1 = go.Figure(data=[go.Pie(labels=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=.7)])
-                fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=['#00E5FF', '#FF1744']))
+                fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                 fig_d1.update_layout(
                     showlegend=True, 
                     height=300, 
@@ -867,7 +858,7 @@ with tabs[1]:
             with comp2:
                 st.markdown("**Sectoren**")
                 if sector_distribution:
-                    # FLASHY DONUT CHART 2
+                    # UPDATED: Matte Donut Chart 2
                     fig_d2 = go.Figure(data=[go.Pie(labels=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=.7)])
                     fig_d2.update_traces(textinfo='percent', marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
                     fig_d2.update_layout(
@@ -889,8 +880,8 @@ with tabs[1]:
                 if sum(monthly_vals) > 0:
                     st.markdown("**Maandelijks Dividend Projectie**")
                     months = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"]
-                    # FLASHY BAR CHART
-                    fig_bar = go.Figure([go.Bar(x=months, y=monthly_vals, marker_color='#76FF03')])
+                    # UPDATED: Matte Bar Chart
+                    fig_bar = go.Figure([go.Bar(x=months, y=monthly_vals, marker_color=MATTE_COLORS["green"])])
                     fig_bar.update_layout(
                         height=300, 
                         margin=dict(t=10, b=10, l=0, r=0), 
@@ -979,77 +970,82 @@ with tabs[1]:
                     sel_info = ticker_details_map.get(selected_ticker, {})
                     long_name = sel_info.get('longName', selected_ticker)
                     
-                    d1, d2 = st.columns([2, 1])
+                    # UPDATED: Layout Logic (Stacked instead of Columns for Mobile)
+                    # Hier verwijderen we de d1, d2 columns om het verticaal te stapelen
                     
-                    with d1:
-                        if selected_ticker in earnings_history_store:
-                            st.markdown(f"**Earnings Surprise: {long_name}**")
-                            st.caption("Bron: Nasdaq / Yahoo")
-                            hist_data = earnings_history_store[selected_ticker]
-                            df_eps = pd.DataFrame(hist_data)
-                            
-                            # SCATTER PLOT LOGICA (BOLLETJES)
-                            fig_eps = go.Figure()
-                            
-                            # Verwacht (Lichtblauw)
-                            fig_eps.add_trace(go.Scatter(
-                                x=df_eps['date'], 
-                                y=df_eps['estimate'], 
-                                name='Verwacht', 
-                                mode='markers',
-                                marker=dict(color='#90CAF9', size=15, symbol='circle')
-                            ))
-                            
-                            # Werkelijk (Donkerblauw)
-                            fig_eps.add_trace(go.Scatter(
-                                x=df_eps['date'], 
-                                y=df_eps['reported'], 
-                                name='Werkelijk', 
-                                mode='markers',
-                                marker=dict(color='#2962FF', size=15, symbol='circle')
-                            ))
-                            
-                            fig_eps.update_layout(
-                                xaxis_title="Datum", 
-                                yaxis_title="EPS", 
-                                height=300, 
-                                margin=dict(t=30, b=0, l=0, r=0),
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                                plot_bgcolor='rgba(0,0,0,0)', 
-                                paper_bgcolor='rgba(0,0,0,0)'
-                            )
-                            fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#444')
-                            fig_eps.update_xaxes(showgrid=False)
-                            st.plotly_chart(fig_eps, use_container_width=True)
-                            
-                            # METRICS ONDER DE GRAFIEK (2x2 Grid)
-                            latest = df_eps.iloc[-1] # Laatste datapunt
-                            est = latest['estimate']
-                            rep = latest['reported']
-                            diff = rep - est
-                            pct = latest['surprise']
-                            
-                            # 2x2 Layout
-                            r1_c1, r1_c2 = st.columns(2)
-                            r2_c1, r2_c2 = st.columns(2)
-                            
-                            r1_c1.metric("Verwacht EPS", f"{est:.2f}")
-                            r1_c2.metric("Werkelijk EPS", f"{rep:.2f}")
-                            r2_c1.metric("Verschil", f"{diff:+.2f}")
-                            r2_c2.metric("Surprise %", f"{pct:+.1f}%", delta=pct, delta_color="normal")
+                    if selected_ticker in earnings_history_store:
+                        st.markdown(f"**Earnings Surprise: {long_name}**")
+                        st.caption("Bron: Nasdaq / Yahoo")
+                        hist_data = earnings_history_store[selected_ticker]
+                        df_eps = pd.DataFrame(hist_data)
+                        
+                        # SCATTER PLOT LOGICA (BOLLETJES)
+                        fig_eps = go.Figure()
+                        
+                        # Verwacht (Licht/Mat)
+                        fig_eps.add_trace(go.Scatter(
+                            x=df_eps['date'], 
+                            y=df_eps['estimate'], 
+                            name='Verwacht', 
+                            mode='markers',
+                            marker=dict(color=MATTE_COLORS["grey"], size=15, symbol='circle')
+                        ))
+                        
+                        # Werkelijk (Donker/Mat)
+                        fig_eps.add_trace(go.Scatter(
+                            x=df_eps['date'], 
+                            y=df_eps['reported'], 
+                            name='Werkelijk', 
+                            mode='markers',
+                            marker=dict(color=MATTE_COLORS["blue"], size=15, symbol='circle')
+                        ))
+                        
+                        fig_eps.update_layout(
+                            xaxis_title="Datum", 
+                            yaxis_title="EPS", 
+                            height=350,  # Iets hoger voor volledig beeld
+                            margin=dict(t=30, b=0, l=0, r=0),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                            plot_bgcolor='rgba(0,0,0,0)', 
+                            paper_bgcolor='rgba(0,0,0,0)'
+                        )
+                        fig_eps.update_yaxes(showgrid=True, gridwidth=1, gridcolor='#444')
+                        fig_eps.update_xaxes(showgrid=False)
+                        # Maximaliseer grafiek (full width)
+                        st.plotly_chart(fig_eps, use_container_width=True)
+                        
+                        # METRICS ONDER DE GRAFIEK (4x1 Grid)
+                        latest = df_eps.iloc[-1]
+                        est = latest['estimate']
+                        rep = latest['reported']
+                        diff = rep - est
+                        pct = latest['surprise']
+                        
+                        # Gebruik kolommen zodat het een 'matrix' onder de grafiek vormt
+                        m1, m2, m3, m4 = st.columns(4)
+                        
+                        m1.metric("Verwacht EPS", f"{est:.2f}")
+                        m2.metric("Werkelijk EPS", f"{rep:.2f}")
+                        m3.metric("Verschil", f"{diff:+.2f}")
+                        
+                        # AANGEPAST: Geen getal onder het percentage, alleen kleur
+                        color_pct = MATTE_COLORS["green"] if pct > 0 else MATTE_COLORS["red"]
+                        m4.markdown(f"<p style='margin-bottom:0px; font-size:14px;'>Surprise %</p><p style='color:{color_pct}; font-size:26px; font-weight:bold; margin-top:0px;'>{pct:+.1f}%</p>", unsafe_allow_html=True)
 
-                        else:
-                            st.info("Geen earnings historie gevonden.")
+                    else:
+                        st.info("Geen earnings historie gevonden.")
                     
-                    with d2:
-                        st.markdown(f"**Laatste Nieuws: {long_name}**")
-                        query = f"{long_name} earnings stock news"
-                        news = get_google_news(query)
-                        if news:
-                            for n in news:
-                                st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
-                        else:
-                            st.write("Geen specifiek nieuws gevonden.")
+                    st.divider()
+                    
+                    # Nieuws sectie (Onder de matrix)
+                    st.markdown(f"**Laatste Nieuws: {long_name}**")
+                    query = f"{long_name} earnings stock news"
+                    news = get_google_news(query)
+                    if news:
+                        for n in news:
+                            st.markdown(f"🔹 [{n['title']}]({n['link']})\n*{n['date']}*")
+                    else:
+                        st.write("Geen specifiek nieuws gevonden.")
 
         # ---------------------------
         # SECTIE 4: Calculator

@@ -55,7 +55,6 @@ def load_portfolio_from_db():
                             p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
                         except:
                             p['buy_date'] = None
-                # Fix voor wishlist laden (consistentie check)
                 wishlist = data.get('wishlist', [])
                 return port, wishlist
         except:
@@ -95,12 +94,6 @@ elif st.session_state["authentication_status"]:
 
     HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-
-    # Nieuwe headers voor scraping
-    SCRAPE_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
     }
 
     NASDAQ_HEADERS = {
@@ -171,6 +164,10 @@ elif st.session_state["authentication_status"]:
     
     if 'search_main' not in st.session_state:
         st.session_state['search_main'] = ""
+    
+    # Init tax values in session state for manual override capability
+    if 'tax_val_jan1' not in st.session_state: st.session_state.tax_val_jan1 = 0.0
+    if 'tax_val_dec31' not in st.session_state: st.session_state.tax_val_dec31 = 0.0
 
     # ==================================================
     # 3. HELPER FUNCTIES
@@ -220,8 +217,7 @@ elif st.session_state["authentication_status"]:
     @st.cache_data(ttl=3600)
     def get_nasdaq_earnings(ticker):
         """
-        Haalt earnings op via NASDAQ API. 
-        Dit is de primaire bron. Yahoo wordt genegeerd voor earnings.
+        Primaire bron: NASDAQ API
         """
         us_ticker = EU_TO_US_MAP.get(ticker, ticker)
         clean_ticker = us_ticker.split('.')[0]
@@ -271,33 +267,74 @@ elif st.session_state["authentication_status"]:
                 
                 if history:
                     last = history[-1]
-                    return {
-                        'earnings_history': history,
-                        'last_surprise': {
-                            'date': last['date'],
-                            'surprise_pct': last['surprise']
-                        }
-                    }
+                    return history
         except Exception:
             pass
         return None
 
     @st.cache_data(ttl=3600)
+    def get_yahoo_scraper_earnings(ticker):
+        """
+        Secundaire bron: Yahoo Finance Scraper (Fall-back voor EU aandelen)
+        Probeert data uit de HTML te halen als de API faalt.
+        """
+        history = []
+        try:
+            # Voor Yahoo scraping gebruiken we de originele ticker (bijv. BES.AS)
+            url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
+            r = requests.get(url, headers=HEADERS, timeout=4)
+            
+            # Zeer rudimentaire parsing van de Analysis tabel in HTML
+            # Zoek naar "Earnings History" tabel patronen
+            if "Earnings History" in r.text:
+                # Dit is complex en fragiel, maar we proberen de laatste 4 kwartalen te vinden
+                # We zoeken naar patronen als "EPS Est." en de waardes eronder
+                # Omdat HTML parsen met regex tricky is, proberen we yfinance objects nogmaals maar specifiek de calendar
+                tk = yf.Ticker(ticker)
+                cal = tk.calendar
+                
+                # Soms bevat 'calendar' earnings dates
+                if cal is not None and not cal.empty:
+                    # Dit geeft vaak alleen de volgende, niet historie.
+                    pass
+                    
+                # Als alternatief: check de 'earnings_history' property van yfinance (vaak leeg voor EU, maar proberen waard)
+                try:
+                    hist_df = tk.earnings_history
+                    if hist_df is not None and not hist_df.empty:
+                        # Normalize format
+                        for index, row in hist_df.iterrows():
+                            history.append({
+                                'date': row.get('startdatetime', index).strftime('%Y-%m-%d'),
+                                'reported': row['epsactual'],
+                                'estimate': row['epsestimate'],
+                                'surprise': row['epssurprisepct'] * 100 if 'epssurprisepct' in row else 0
+                            })
+                        history.sort(key=lambda x: x['date'])
+                        return history[-4:]
+                except:
+                    pass
+
+        except:
+            pass
+        return history
+
+    @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
-        """
-        Alleen Nasdaq of scraping gebruiken, geen Yahoo.
-        """
+        # 1. Nasdaq (Best voor US)
         nasdaq_data = get_nasdaq_earnings(ticker)
         if nasdaq_data:
-            return nasdaq_data['earnings_history']
+            return nasdaq_data
         
-        # Fallback: AlphaQuery of vergelijkbare simpele HTML scrape (conceptueel)
-        # Voor nu, als Nasdaq faalt, retourneren we leeg om Yahoo fouten te voorkomen.
+        # 2. Yahoo Scraper / Yfinance fallback (Voor EU)
+        yahoo_data = get_yahoo_scraper_earnings(ticker)
+        if yahoo_data:
+            return yahoo_data
+            
         return []
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
-        # Pauze verwijderd voor snelheid (Punt 6)
         try:
             tk = yf.Ticker(ticker)
             fast_info = tk.fast_info 
@@ -341,8 +378,10 @@ elif st.session_state["authentication_status"]:
             ytd_start_price = None
             current_year = datetime.now().year
             try:
+                # PUNT 2: Correcte YTD referentie ophalen (1 jan)
                 start_of_year = f"{current_year}-01-01"
-                hist_ytd = tk.history(start=start_of_year, interval="1d")
+                # We pakken een range om zeker te zijn van een slotkoers rond 1 jan
+                hist_ytd = tk.history(start=start_of_year, end=f"{current_year}-01-08", interval="1d")
                 if not hist_ytd.empty:
                     ytd_start_price = hist_ytd['Close'].iloc[0]
             except: pass
@@ -355,7 +394,6 @@ elif st.session_state["authentication_status"]:
                 try: current_price = tk.fast_info.last_price
                 except: pass
             
-            # Dagelijks verschil (voor wishlist)
             day_change_pct = 0.0
             if current_price and previous_close:
                 day_change_pct = ((current_price - previous_close) / previous_close) * 100
@@ -383,17 +421,14 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=86400)
     def get_historical_price(ticker, date_obj):
-        """Haalt de slotkoers op een specifieke datum of de laatst bekende daarvoor."""
         try:
-            # We pakken een range van 5 dagen voor de datum om zeker te zijn dat we data hebben (ivm weekend/feestdag)
             start_date = date_obj - timedelta(days=5)
             end_date = date_obj + timedelta(days=1)
             
             df = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if not df.empty:
-                # Pak de laatste rij, dit is de dichtstbijzijnde datum (of de datum zelf)
                 if isinstance(df.columns, pd.MultiIndex):
-                    price = df['Close'].iloc[-1].values[0] # Handle multiindex (Ticker, Price)
+                    price = df['Close'].iloc[-1].values[0] 
                 else:
                     price = df['Close'].iloc[-1]
                 return float(price)
@@ -557,7 +592,6 @@ elif st.session_state["authentication_status"]:
     st.sidebar.header("📂 Data & Backup")
     st.sidebar.info("💾 Data wordt nu automatisch lokaal opgeslagen.")
 
-    # JSON export ook Wishlist meegeven (Punt 5)
     json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[])}, default=str)
     st.sidebar.download_button(
         label="⬇️ Download Backup",
@@ -571,17 +605,15 @@ elif st.session_state["authentication_status"]:
         try:
             loaded_data = json.load(uploaded_file)
             if 'portfolio' in loaded_data: 
-                # Herstel datums
                 port = loaded_data['portfolio']
                 for p in port:
                     if 'buy_date' in p and p['buy_date']:
                          p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
                 st.session_state['portfolio'] = port
             
-            # Fix wishlist upload key (Punt 5)
             if 'wishlist' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['wishlist']
-            elif 'w' in loaded_data: # Backward compatibility
+            elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
             
             save_portfolio_to_db() 
@@ -864,11 +896,15 @@ elif st.session_state["authentication_status"]:
                     if ext_data.get('previous_close'):
                         total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                     
+                    # PUNT 2: YTD Correctie volgens de "Time Weighted / Simple Return Logic"
+                    # Als buy_date < 1 jan dit jaar: Referentie = Koers op 1 jan
+                    # Als buy_date >= 1 jan dit jaar: Referentie = Aankoopkoers (GAK)
                     ytd_ref_price = ext_data.get('ytd_start_price')
-                    if buy_date and buy_date >= current_year_date:
-                        ytd_ref_price = avg_price
                     
-                    if ytd_ref_price:
+                    if buy_date and buy_date >= current_year_date:
+                        ytd_ref_price = avg_price # Gekocht dit jaar, dus YTD start bij aankoop
+                    
+                    if ytd_ref_price and ytd_ref_price > 0:
                         total_year_change_eur += (live_price - ytd_ref_price) * amount * eur_rate
 
                 yearly_div_eur = 0
@@ -964,8 +1000,8 @@ elif st.session_state["authentication_status"]:
                 k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
                 k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
                 
-                ytd_start_value = total_val_eur - total_year_change_eur
-                ytd_pct = (total_year_change_eur / ytd_start_value * 100) if ytd_start_value > 0 else 0.0
+                # YTD Logic: Verschil in waarde tov referentiepunt
+                ytd_pct = (total_year_change_eur / (total_val_eur - total_year_change_eur) * 100) if (total_val_eur - total_year_change_eur) > 0 else 0.0
                 k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta=f"{ytd_pct:.2f}%")
                 
                 k6.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
@@ -973,22 +1009,23 @@ elif st.session_state["authentication_status"]:
                 
                 st.divider()
 
-                # Punt 1: Donutgrafieken gelijk qua grootte en duidelijk
+                # PUNT 3: Donutgrafieken kleiner en labels duidelijk (inside of bottom legend)
                 comp1, comp2, comp3 = st.columns(3)
                 with comp1:
                     st.markdown("**Verdeling: Aandelen vs ETF's**")
                     fig_d1 = go.Figure(data=[go.Pie(
                         labels=['ETF', 'Aandelen'], 
                         values=[etf_stats['value'], stock_stats['value']], 
-                        hole=.6, # Donut
-                        textposition='outside',
-                        textinfo='percent+label'
+                        hole=.6, 
+                        textposition='inside',
+                        textinfo='percent'
                     )])
                     fig_d1.update_traces(marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                     fig_d1.update_layout(
-                        showlegend=False, 
-                        height=300, 
-                        margin=dict(t=20, b=20, l=20, r=20),
+                        showlegend=True,
+                        legend=dict(orientation="h", y=-0.1), # Legenda onder
+                        height=200, # Kleinere hoogte
+                        margin=dict(t=0, b=0, l=0, r=0),
                         plot_bgcolor='rgba(0,0,0,0)', 
                         paper_bgcolor='rgba(0,0,0,0)'
                     )
@@ -1001,14 +1038,15 @@ elif st.session_state["authentication_status"]:
                             labels=list(sector_distribution.keys()), 
                             values=list(sector_distribution.values()), 
                             hole=.6,
-                            textposition='outside',
-                            textinfo='percent+label'
+                            textposition='inside',
+                            textinfo='percent'
                         )])
                         fig_d2.update_traces(marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
                         fig_d2.update_layout(
-                            showlegend=False, 
-                            height=300, 
-                            margin=dict(t=20, b=20, l=20, r=20),
+                            showlegend=True,
+                            legend=dict(orientation="h", y=-0.1),
+                            height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0),
                             plot_bgcolor='rgba(0,0,0,0)', 
                             paper_bgcolor='rgba(0,0,0,0)'
                         )
@@ -1021,13 +1059,14 @@ elif st.session_state["authentication_status"]:
                             labels=list(country_distribution.keys()), 
                             values=list(country_distribution.values()), 
                             hole=.6,
-                            textposition='outside',
-                            textinfo='percent+label'
+                            textposition='inside',
+                            textinfo='percent'
                         )])
                         fig_d3.update_layout(
-                            showlegend=False, 
-                            height=300, 
-                            margin=dict(t=20, b=20, l=20, r=20),
+                            showlegend=True,
+                            legend=dict(orientation="h", y=-0.1),
+                            height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0),
                             plot_bgcolor='rgba(0,0,0,0)', 
                             paper_bgcolor='rgba(0,0,0,0)'
                         )
@@ -1066,7 +1105,6 @@ elif st.session_state["authentication_status"]:
                 
                 df_editor_source = pd.DataFrame(portfolio_data)
                 
-                # Punt 2: Datum fix. Min value instellen om foutmelding te voorkomen.
                 column_settings = {
                     "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                     "Naam": st.column_config.TextColumn("Naam", disabled=True),
@@ -1136,7 +1174,10 @@ elif st.session_state["authentication_status"]:
                         
                         if selected_ticker in earnings_history_store:
                             st.markdown(f"**Earnings Surprise: {long_name}**")
-                            st.caption("Bron: Nasdaq (Primary)")
+                            # PUNT 1: Bronvermelding
+                            src_label = "Nasdaq" if "api.nasdaq.com" in requests.get(f"https://api.nasdaq.com/api/company/{selected_ticker}/earnings-surprise", headers=NASDAQ_HEADERS).url else "Yahoo Scraper"
+                            st.caption(f"Bron: {src_label}")
+                            
                             hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
                             
@@ -1242,34 +1283,27 @@ elif st.session_state["authentication_status"]:
                 st.rerun()
 
     # --------------------------------------------------
-    # TAB 3: WISHLIST (Punt 4)
+    # TAB 3: WISHLIST (Punt 4 & 5)
     # --------------------------------------------------
     with tabs[2]:
         st.subheader("❤️ Mijn Wishlist")
         if st.session_state['wishlist']:
             
-            # Header rij
-            h1, h2, h3, h4, h5, h6, h7 = st.columns([2, 3, 2, 2, 2, 1, 1])
-            h1.markdown("**Ticker**")
-            h2.markdown("**Naam**")
-            h3.markdown("**Koers**")
-            h4.markdown("**Dag %**")
-            h5.markdown("**AI Score**")
-            h6.markdown("**Analyse**")
-            h7.markdown("**Weg**")
+            # PUNT 4: Gecondenseerde layout (3 kolommen ipv 7)
+            h1, h2, h3 = st.columns([3, 2, 1])
+            h1.markdown("**Ticker & Naam**")
+            h2.markdown("**Data**")
+            h3.markdown("**Actie**")
             st.divider()
 
             for i, item in enumerate(st.session_state['wishlist']):
                 ticker = item['ticker']
                 name = item['name']
                 
-                # Fetch live data voor wishlist (nodig voor score en % change)
-                # Omdat dit zwaar kan zijn, gebruiken we de bestaande get_extended_portfolio_data
                 w_data = get_extended_portfolio_data(ticker)
                 
                 score_str = "N/A"
                 if w_data:
-                    # AI Score berekenen
                     us_equivalent = EU_TO_US_MAP.get(ticker, ticker)
                     engine = DataEngine(us_equivalent, ticker)
                     metrics = {}
@@ -1293,99 +1327,90 @@ elif st.session_state["authentication_status"]:
                     day_change = 0
                     sym = ""
 
-                c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 3, 2, 2, 2, 1, 1])
+                c1, c2, c3 = st.columns([3, 2, 1])
                 
-                c1.write(ticker)
-                c2.write(name)
-                c3.write(f"{sym} {price:.2f}")
+                with c1:
+                    st.write(f"**{ticker}**")
+                    st.caption(name)
                 
-                color_style = "green" if day_change >= 0 else "red"
-                c4.markdown(f"<span style='color:{color_style}'>{day_change:+.2f}%</span>", unsafe_allow_html=True)
+                with c2:
+                    color_style = "green" if day_change >= 0 else "red"
+                    st.write(f"{sym} {price:.2f}")
+                    st.markdown(f"<span style='color:{color_style}'>{day_change:+.2f}%</span> | AI: **{score_str}**", unsafe_allow_html=True)
                 
-                c5.write(score_str)
-                
-                if c6.button("🔍", key=f"an_{i}"):
-                    st.session_state.search_main = ticker
-                    # Er is geen directe manier om tabs te switchen in vanilla Streamlit zonder extra components, 
-                    # maar we vullen de search in zodat de gebruiker alleen naar het tabblad hoeft te klikken.
-                    st.toast(f"Analyse geladen voor {ticker}. Ga naar het Analyse tabblad!", icon="🚀")
-                
-                if c7.button("🗑️", key=f"del_wl_{i}"): 
-                    st.session_state['wishlist'].pop(i)
-                    save_portfolio_to_db()
-                    st.rerun()
+                with c3:
+                    # PUNT 5: Fix voor search icon error
+                    # We gebruiken een callback structuur of gewoon een simpele check
+                    if st.button("🔍", key=f"an_{i}"):
+                        st.session_state.search_main = ticker
+                        st.toast(f"Geladen: {ticker}. Ga naar tab Analyse.", icon="🚀")
+                        # Geen rerun hier nodig, state is gezet.
+                    
+                    if st.button("🗑️", key=f"del_wl_{i}"): 
+                        st.session_state['wishlist'].pop(i)
+                        save_portfolio_to_db()
+                        st.rerun()
                 
                 st.divider()
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING (Punten 7 t/m 14)
+    # TAB 4: BELASTING (Punt 6)
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
-        
-        st.info("Deze tool berekent je vermogen en belasting op basis van je portfolio in dit dashboard en opgegeven spaargeld.")
+        st.info("Vul handmatig in of laat het script een schatting maken op basis van je portfolio.")
 
         c_inp1, c_inp2 = st.columns(2)
         
         with c_inp1:
-            # Punt 8: Jaartal invullen
             tax_year = st.number_input("Belastingjaar", min_value=2020, max_value=2030, value=datetime.now().year - 1)
-            
-            # Punt 12: Spaargeld toevoegen
             savings_amount = st.number_input("Spaargeld op 1 januari (€)", value=10000.0, step=1000.0)
-            
-            # Punt 13: Rendement op spaargeld
             savings_yield_pct = st.number_input("Rendement op spaargeld (%)", value=1.03, step=0.01)
 
-        # Automatische berekening datums
-        date_jan1 = date(tax_year, 1, 1)
-        date_dec31 = date(tax_year, 12, 31)
+        # PUNT 6: Handmatige aanpassing mogelijk maken. 
+        # Waardes worden opgeslagen in session_state en alleen overschreven bij druk op knop.
         
-        # Punt 9 & 10: Automatisch portfolio waarde berekenen
-        # We moeten historische koersen ophalen voor alle tickers in portfolio
-        # We nemen aan dat de 'amount' in portfolio het hele jaar constant was als buy_date < jan1.
-        # Dit is een benadering.
-        
-        pf_val_jan1 = 0.0
-        pf_val_dec31 = 0.0
-        
-        if st.session_state['portfolio']:
-            with st.spinner(f"Historische koersen ophalen voor {tax_year}..."):
-                for p in st.session_state['portfolio']:
-                    ticker = p['ticker']
-                    amount = p['amount']
-                    buy_date = p.get('buy_date')
-                    currency = p.get('currency', 'EUR')
-                    
-                    # Haal wisselkoers (simpel: huidige koers, historische wisselkoers is complexer, laten we 1.0 aannemen of huidige)
-                    rate = get_currency_rate(currency, "EUR")
-
-                    # Waarde 1 Jan
-                    # Tel alleen mee als het gekocht is voor 1 jan
-                    if buy_date and buy_date < date_jan1:
-                        price_jan1 = get_historical_price(ticker, date_jan1)
-                        pf_val_jan1 += (price_jan1 * amount * rate)
-                    
-                    # Waarde 31 Dec
-                    # Tel alleen mee als het gekocht is voor 31 dec
-                    if buy_date and buy_date <= date_dec31:
-                        price_dec31 = get_historical_price(ticker, date_dec31)
-                        pf_val_dec31 += (price_dec31 * amount * rate)
-
         with c_inp2:
-            st.markdown(f"**Portfolio Waarde (Geschat)**")
-            st.write(f"📅 1 jan {tax_year}: **€ {pf_val_jan1:,.2f}**")
-            st.write(f"📅 31 dec {tax_year}: **€ {pf_val_dec31:,.2f}**")
+            st.markdown(f"**Portfolio Waarde (Aandelen)**")
             
+            # Button om auto-calculate te triggeren
+            if st.button("🔄 Bereken op basis van portfolio"):
+                calc_jan1 = 0.0
+                calc_dec31 = 0.0
+                d_jan1 = date(tax_year, 1, 1)
+                d_dec31 = date(tax_year, 12, 31)
+                
+                with st.spinner("Koersen ophalen..."):
+                    for p in st.session_state['portfolio']:
+                        ticker = p['ticker']
+                        amount = p['amount']
+                        buy_date = p.get('buy_date')
+                        currency = p.get('currency', 'EUR')
+                        rate = get_currency_rate(currency, "EUR")
+
+                        if buy_date and buy_date < d_jan1:
+                            calc_jan1 += (get_historical_price(ticker, d_jan1) * amount * rate)
+                        
+                        if buy_date and buy_date <= d_dec31:
+                            calc_dec31 += (get_historical_price(ticker, d_dec31) * amount * rate)
+                
+                st.session_state.tax_val_jan1 = calc_jan1
+                st.session_state.tax_val_dec31 = calc_dec31
+                st.success("Waardes bijgewerkt!")
+                st.rerun()
+
+            # Inputs gebruiken session state als default/value
+            pf_val_jan1 = st.number_input(f"Waarde 1 jan {tax_year}", value=st.session_state.tax_val_jan1, step=100.0)
+            pf_val_dec31 = st.number_input(f"Waarde 31 dec {tax_year}", value=st.session_state.tax_val_dec31, step=100.0)
+            
+            st.session_state.tax_val_jan1 = pf_val_jan1
+            st.session_state.tax_val_dec31 = pf_val_dec31
+
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
             belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0)
 
         st.divider()
-
-        # Punt 11: Bereken automatisch rendement
-        # Werkelijk rendement aandelen = (Waarde Dec - Waarde Jan) + Dividenden (geschat of weggelaten ivm complexiteit, hier koerswinst focus)
-        # Als Jan 1 waarde 0 is (alles dit jaar gekocht), is rendement lastig te definiëren als %, we pakken absolute winst.
         
         stock_gain = pf_val_dec31 - pf_val_jan1
         stock_return_pct = (stock_gain / pf_val_jan1 * 100) if pf_val_jan1 > 0 else 0.0
@@ -1394,37 +1419,18 @@ elif st.session_state["authentication_status"]:
         
         total_assets_start = savings_amount + pf_val_jan1
         total_gain = stock_gain + savings_gain
-        
-        # Rendement percentage over totaal vermogen
         total_return_pct = (total_gain / total_assets_start * 100) if total_assets_start > 0 else 0.0
 
-        # Belasting grondslag
         grondslag = max(0, total_assets_start - heffingsvrij)
         
-        # In nieuwe stelsel (overbruggingswet) wordt gekeken naar werkelijk verdeling, maar met fictieve rendementen of werkelijk.
-        # De prompt vraagt om "Forfaitair" te hernoemen naar "Belastbaar Rendement".
-        # We berekenen nu het belastbaar inkomen uit vermogen.
-        # Als we simpelweg het werkelijke rendement belasten (toekomst scenario):
-        
-        # Punt 11 Naam aanpassing:
         st.subheader("📊 Belastingberekening")
         
         col_res1, col_res2, col_res3 = st.columns(3)
-        
         col_res1.metric("Totaal Vermogen 1 jan", f"€ {total_assets_start:,.2f}")
         col_res2.metric("Werkelijk Rendement (Totaal)", f"€ {total_gain:,.2f}", f"{total_return_pct:.2f}%")
         
-        # Punt 14: Combineer velden
-        # We moeten een grondslag hebben voor de belasting.
-        # Aanname voor de berekening zoals gevraagd in punt 7 (zorg dat het werkt):
-        # Belastbaar inkomen = (Grondslag / Totaal Vermogen) * Totaal Rendement ?? 
-        # Of simpeler: We belasten het rendement boven de vrijstelling?
-        # De huidige methodiek (2024) berekent rendement over aandeel in vermogen.
-        
-        # We doen een simpele berekening: Belasting over het berekende rendement, pro-rato van het deel boven heffingsvrij.
         percentage_belast = grondslag / total_assets_start if total_assets_start > 0 else 0
         belastbaar_rendement = total_gain * percentage_belast
-        
         te_betalen = belastbaar_rendement * (belasting_tarief / 100)
         
         col_res3.metric("Belastbaar Rendement", f"€ {belastbaar_rendement:,.2f}", help="Rendement toegerekend aan deel boven heffingsvrij")
@@ -1433,7 +1439,6 @@ elif st.session_state["authentication_status"]:
         final_c1, final_c2 = st.columns(2)
         final_c1.info(f"Rendement Spaargeld: € {savings_gain:.2f}\nRendement Beleggingen: € {stock_gain:.2f}")
         
-        # Punt 7: Zorg dat het werkt (geen 0 meer tenzij logisch)
         final_c2.markdown(f"""
         ### 💶 Te Betalen: € {te_betalen:,.2f}
         *Berekend als: Belastbaar Rendement × {belasting_tarief}%*

@@ -96,13 +96,6 @@ elif st.session_state["authentication_status"]:
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    NASDAQ_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://www.nasdaq.com',
-        'Referer': 'https://www.nasdaq.com/'
-    }
-
     EU_TO_US_MAP = {
         "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
         "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -162,7 +155,6 @@ elif st.session_state["authentication_status"]:
     if 'search_results' not in st.session_state:
         st.session_state['search_results'] = []
     
-    # State voor zoekterm
     if 'search_main' not in st.session_state:
         st.session_state['search_main'] = ""
     
@@ -215,104 +207,78 @@ elif st.session_state["authentication_status"]:
             return 1.0
 
     @st.cache_data(ttl=3600)
-    def get_stock_events_earnings(ticker):
+    def get_yahoo_earnings_calendar(ticker):
         """
-        Scrapet earnings data van stockanalysis.com
+        Haalt earnings dates op via Yahoo API.
+        Checkt of er data is in het huidige jaar.
         """
         history = []
         try:
-            clean_ticker = ticker.split('.')[0]
-            url = f"https://stockanalysis.com/stocks/{clean_ticker}/earnings/"
+            tk = yf.Ticker(ticker)
+            # earnings_dates geeft een DataFrame met index (Timestamp) en kolommen 'EPS Estimate', 'Reported EPS', 'Surprise(%)'
+            df = tk.earnings_dates
             
-            try:
-                dfs = pd.read_html(url, headers=0)
-                if dfs:
-                    df = dfs[0]
-                    df.columns = [c.lower() for c in df.columns]
-                    current_date = datetime.now()
+            if df is not None and not df.empty:
+                # Verwijder tijdzone info voor makkelijke vergelijking
+                if df.index.tz is not None:
+                    df.index = df.index.tz_localize(None)
+                
+                current_year = datetime.now().year
+                
+                # CHECK: Is er data voor het huidige jaar? (Past or Future)
+                has_current_year_data = df[df.index.year == current_year]
+                
+                if has_current_year_data.empty:
+                    # Geen earnings bekend voor dit jaar -> return None (Grafiek niet tonen)
+                    return None
+                
+                # Als er wel data is, bouw de historie voor de grafiek (alleen verleden)
+                now = datetime.now()
+                df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
+                
+                # Sorteer nieuw naar oud voor de head(4)
+                df_past = df_past.sort_index(ascending=False)
+                top_4 = df_past.head(4)
+                
+                for date_idx, row in top_4.iterrows():
+                    est = row['EPS Estimate']
+                    rep = row['Reported EPS']
+                    surp = row['Surprise(%)']
                     
-                    for index, row in df.iterrows():
-                        try:
-                            date_str = str(row.get('date', ''))
-                            dt = pd.to_datetime(date_str, errors='coerce')
-                            
-                            if pd.isna(dt) or dt > current_date:
-                                continue
-                                
-                            est = row.get('eps est', 0)
-                            rep = row.get('eps', 0) 
-                            
-                            if isinstance(est, str): est = float(re.sub(r'[^\d\.-]', '', est))
-                            if isinstance(rep, str): rep = float(re.sub(r'[^\d\.-]', '', rep))
-                            
-                            if est != 0:
-                                surp = ((rep - est) / abs(est)) * 100
-                            else:
-                                surp = 0
-                                
-                            history.append({
-                                'date': dt.strftime('%Y-%m-%d'),
-                                'reported': rep,
-                                'estimate': est,
-                                'surprise': surp
-                            })
-                        except:
-                            continue
-                            
-                    history.sort(key=lambda x: x['date'])
-                    return history[-4:]
-            except Exception:
-                pass
-
+                    if pd.isna(surp) and est != 0:
+                        surp = ((rep - est) / abs(est)) * 100
+                    elif pd.isna(surp):
+                        surp = 0
+                        
+                    history.append({
+                        'date': date_idx.strftime('%Y-%m-%d'),
+                        'reported': float(rep),
+                        'estimate': float(est),
+                        'surprise': float(surp)
+                    })
+                
+                # Return oud naar nieuw voor grafiek
+                if history:
+                    history.reverse()
+                    return history
         except Exception:
             pass
-        return history
+        return None
 
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
-        se_data = get_stock_events_earnings(ticker)
-        if se_data:
-            return se_data
-            
-        nasdaq_data = get_nasdaq_earnings(ticker)
-        if nasdaq_data:
-            return nasdaq_data
+        # We gaan direct naar Yahoo zoals gevraagd
+        # Probeer eerst de originele ticker
+        data = get_yahoo_earnings_calendar(ticker)
+        if data: return data
+        
+        # Probeer US mapping als fallback
+        us_ticker = EU_TO_US_MAP.get(ticker)
+        if us_ticker:
+            data = get_yahoo_earnings_calendar(us_ticker)
+            if data: return data
             
         return []
-
-    def get_nasdaq_earnings(ticker):
-        us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-        clean_ticker = us_ticker.split('.')[0]
-        url = f"https://api.nasdaq.com/api/company/{clean_ticker}/earnings-surprise"
-        try:
-            r = requests.get(url, headers=NASDAQ_HEADERS, timeout=5)
-            data = r.json()
-            if data.get('data') and data['data'].get('earningsSurpriseTable'):
-                rows = data['data']['earningsSurpriseTable'].get('rows', [])
-                history = []
-                current_date = datetime.now()
-                for row in rows: 
-                    try:
-                        date_str = row.get('dateReported')
-                        if not date_str: continue
-                        dt = pd.to_datetime(date_str, errors='coerce')
-                        if dt > current_date: continue
-                        eps_rep = row.get('eps')
-                        eps_est = row.get('consensusForecast')
-                        if eps_rep == "N/A" or eps_est == "N/A": continue
-                        val_rep = float(str(eps_rep).replace('$', '').replace(',', ''))
-                        val_est = float(str(eps_est).replace('$', '').replace(',', ''))
-                        history.append({
-                            'dt': dt, 'date': date_str, 'reported': val_rep, 'estimate': val_est,
-                            'surprise': ((val_rep - val_est) / abs(val_est) * 100) if val_est != 0 else 0
-                        })
-                    except: continue
-                history.sort(key=lambda x: x['dt'], reverse=True)
-                history = history[:4]
-                history.reverse()
-                if history: return history
-        except: pass
-        return None
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
@@ -581,8 +547,10 @@ elif st.session_state["authentication_status"]:
             elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
             
+            # FIX: Direct opslaan naar DB en rerunnen
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
+            time.sleep(1) # Korte pauze voor UX
             st.rerun()
         except Exception as e:
             st.error(f"Fout bij laden bestand: {e}")
@@ -600,7 +568,6 @@ elif st.session_state["authentication_status"]:
     # TAB 1: ANALYSE
     # --------------------------------------------------
     with tabs[0]:
-        # Fix 2: Callback methode voor veilige update
         def update_search():
             st.session_state.search_main = st.session_state.search_input_widget
 
@@ -616,14 +583,12 @@ elif st.session_state["authentication_status"]:
 
         col_search, col_period = st.columns([3, 1])
         with col_search:
-            # Widget key is gescheiden van de search_main variabele
             st.text_input(
                 "Zoek aandeel (Typ en druk op Enter):", 
                 key="search_input_widget", 
                 value=st.session_state.search_main,
                 on_change=update_search
             )
-            # Run search op basis van de huidige state
             run_search()
 
             selected_ticker = None
@@ -1143,8 +1108,7 @@ elif st.session_state["authentication_status"]:
                         
                         if selected_ticker in earnings_history_store:
                             st.markdown(f"**Earnings Surprise: {long_name}**")
-                            src_label = "Stock Analysis" if "stockanalysis.com" in requests.get(f"https://stockanalysis.com/stocks/{selected_ticker}/earnings/", headers=HEADERS).url else "Nasdaq"
-                            st.caption(f"Bron: {src_label} / Nasdaq")
+                            st.caption(f"Bron: Yahoo Finance")
                             
                             hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
@@ -1204,7 +1168,7 @@ elif st.session_state["authentication_status"]:
                             )
 
                         else:
-                            st.info("Geen earnings historie gevonden.")
+                            st.info("Geen earnings informatie beschikbaar voor het huidige jaar.")
                         
                         st.divider()
                         
@@ -1251,7 +1215,7 @@ elif st.session_state["authentication_status"]:
                 st.rerun()
 
     # --------------------------------------------------
-    # TAB 3: WISHLIST (Fix: Layout & Selection Mode)
+    # TAB 3: WISHLIST (Punt 3: Percentage Fix)
     # --------------------------------------------------
     with tabs[2]:
         st.subheader("❤️ Mijn Wishlist")
@@ -1293,23 +1257,23 @@ elif st.session_state["authentication_status"]:
                     "Ticker": ticker,
                     "Naam": name,
                     "Huidige Koers": price,
+                    # FIX: Percentages moeten als fractie (0.015 voor 1.5%) als we %.2f%% gebruiken
                     "Dag %": day_change / 100.0, 
                     "AI Score": score_str
                 })
             
             df_wishlist = pd.DataFrame(wishlist_data)
             
-            # Layout config
             col_config = {
                 "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False),
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Naam": st.column_config.TextColumn("Naam", disabled=True),
                 "Huidige Koers": st.column_config.NumberColumn("Koers", format="%.2f", disabled=True),
-                "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f%%", disabled=True),
+                # FIX: Format zorgt voor juiste weergave
+                "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f %%", disabled=True),
                 "AI Score": st.column_config.TextColumn("AI Score", disabled=True)
             }
             
-            # Fix: Geen selection_mode want dat crasht in oudere versies.
             edited_wishlist = st.data_editor(
                 df_wishlist,
                 column_config=col_config,
@@ -1318,7 +1282,6 @@ elif st.session_state["authentication_status"]:
                 key="wishlist_editor"
             )
             
-            # Verwijder Logic
             if not df_wishlist.equals(edited_wishlist):
                 new_wishlist_state = []
                 for idx, row in edited_wishlist.iterrows():
@@ -1331,24 +1294,20 @@ elif st.session_state["authentication_status"]:
                     save_portfolio_to_db()
                     st.rerun()
 
-            # Analyse Logic (Net als Portfolio tab: Selectbox onder tabel)
             st.divider()
             st.subheader("🔎 Details & Analyse")
             
-            # Maak een lijst voor de dropdown
             wl_tickers = [item['Ticker'] for item in wishlist_data]
-            
             selected_wl_ticker = st.selectbox("Selecteer aandeel om te analyseren:", wl_tickers)
             
             if st.button(f"🚀 Analyseer {selected_wl_ticker}"):
-                # Update search state via de variabele, niet de widget key
                 st.session_state.search_main = selected_wl_ticker
                 st.toast(f"Analyse geladen voor {selected_wl_ticker}. Ga naar het 'Analyse' tabblad!", icon="✅")
                 
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING (Rate Limit Fix)
+    # TAB 4: BELASTING (Punt 4 & 5: Datum Logica & Tarief)
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
@@ -1370,7 +1329,6 @@ elif st.session_state["authentication_status"]:
                 d_jan1 = date(tax_year, 1, 1)
                 d_dec31 = date(tax_year, 12, 31)
                 
-                # Fix: Bulk Download
                 tickers_list = [p['ticker'] for p in st.session_state['portfolio']]
                 
                 if tickers_list:
@@ -1401,9 +1359,12 @@ elif st.session_state["authentication_status"]:
                                         pass
                                     return 0.0
 
+                                # PUNT 4: FIX DATUM LOGICA
+                                # 1 jan: Alleen aandelen gekocht VOOR 1 jan
                                 if buy_date and buy_date < d_jan1:
                                     calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
                                 
+                                # 31 dec: Aandelen gekocht VOOR of OP 31 dec (dus ook gedurende het jaar)
                                 if buy_date and buy_date <= d_dec31:
                                     calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
                                     
@@ -1422,7 +1383,8 @@ elif st.session_state["authentication_status"]:
             st.session_state.tax_val_dec31 = pf_val_dec31
 
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
-            belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0)
+            # PUNT 5: Aanpasbaar Belastingtarief
+            belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
 
         st.divider()
         

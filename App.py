@@ -162,10 +162,10 @@ elif st.session_state["authentication_status"]:
     if 'search_results' not in st.session_state:
         st.session_state['search_results'] = []
     
+    # Gebruik een interne key voor de widget om conflicten te voorkomen
     if 'search_main' not in st.session_state:
         st.session_state['search_main'] = ""
     
-    # Init tax values in session state for manual override capability
     if 'tax_val_jan1' not in st.session_state: st.session_state.tax_val_jan1 = 0.0
     if 'tax_val_dec31' not in st.session_state: st.session_state.tax_val_dec31 = 0.0
 
@@ -215,123 +215,119 @@ elif st.session_state["authentication_status"]:
             return 1.0
 
     @st.cache_data(ttl=3600)
-    def get_nasdaq_earnings(ticker):
+    def get_stock_events_earnings(ticker):
         """
-        Primaire bron: NASDAQ API
-        """
-        us_ticker = EU_TO_US_MAP.get(ticker, ticker)
-        clean_ticker = us_ticker.split('.')[0]
-        
-        url = f"https://api.nasdaq.com/api/company/{clean_ticker}/earnings-surprise"
-        
-        try:
-            r = requests.get(url, headers=NASDAQ_HEADERS, timeout=5)
-            data = r.json()
-            
-            if data.get('data') and data['data'].get('earningsSurpriseTable'):
-                rows = data['data']['earningsSurpriseTable'].get('rows', [])
-                history = []
-                current_date = datetime.now()
-                
-                for row in rows: 
-                    try:
-                        date_str = row.get('dateReported')
-                        if not date_str: continue
-
-                        dt = pd.to_datetime(date_str, errors='coerce')
-                        
-                        if dt > current_date:
-                            continue
-
-                        eps_rep = row.get('eps')
-                        eps_est = row.get('consensusForecast')
-                        
-                        if eps_rep == "N/A" or eps_est == "N/A": continue
-                        
-                        val_rep = float(str(eps_rep).replace('$', '').replace(',', ''))
-                        val_est = float(str(eps_est).replace('$', '').replace(',', ''))
-                        
-                        history.append({
-                            'dt': dt,
-                            'date': date_str,
-                            'reported': val_rep,
-                            'estimate': val_est,
-                            'surprise': ((val_rep - val_est) / abs(val_est) * 100) if val_est != 0 else 0
-                        })
-                    except:
-                        continue
-                
-                history.sort(key=lambda x: x['dt'], reverse=True)
-                history = history[:4]
-                history.reverse()
-                
-                if history:
-                    last = history[-1]
-                    return history
-        except Exception:
-            pass
-        return None
-
-    @st.cache_data(ttl=3600)
-    def get_yahoo_scraper_earnings(ticker):
-        """
-        Secundaire bron: Yahoo Finance Scraper (Fall-back voor EU aandelen)
-        Probeert data uit de HTML te halen als de API faalt.
+        Scrapet earnings data van stockanalysis.com (Stock Events alternatief)
         """
         history = []
         try:
-            # Voor Yahoo scraping gebruiken we de originele ticker (bijv. BES.AS)
-            url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
-            r = requests.get(url, headers=HEADERS, timeout=4)
+            # Converteer ticker indien nodig (bv HEIA.AS -> HEIA.AS wordt vaak niet direct gevonden, strip suffix voor US)
+            # Voor stockanalysis gebruiken we vaak de pure ticker of zoeken we
+            clean_ticker = ticker.split('.')[0]
+            url = f"https://stockanalysis.com/stocks/{clean_ticker}/earnings/"
             
-            # Zeer rudimentaire parsing van de Analysis tabel in HTML
-            # Zoek naar "Earnings History" tabel patronen
-            if "Earnings History" in r.text:
-                # Dit is complex en fragiel, maar we proberen de laatste 4 kwartalen te vinden
-                # We zoeken naar patronen als "EPS Est." en de waardes eronder
-                # Omdat HTML parsen met regex tricky is, proberen we yfinance objects nogmaals maar specifiek de calendar
-                tk = yf.Ticker(ticker)
-                cal = tk.calendar
-                
-                # Soms bevat 'calendar' earnings dates
-                if cal is not None and not cal.empty:
-                    # Dit geeft vaak alleen de volgende, niet historie.
-                    pass
+            # Pandas read_html is krachtig en kan tabellen direct parsen
+            try:
+                dfs = pd.read_html(url, headers=0)
+                if dfs:
+                    df = dfs[0]
+                    # Kolommen zijn vaak: Date, Quarter, EPS Est, EPS / EPS Reported, Surprise
+                    # Pas aan op basis van werkelijke structuur
                     
-                # Als alternatief: check de 'earnings_history' property van yfinance (vaak leeg voor EU, maar proberen waard)
-                try:
-                    hist_df = tk.earnings_history
-                    if hist_df is not None and not hist_df.empty:
-                        # Normalize format
-                        for index, row in hist_df.iterrows():
+                    # Normaliseer kolomnamen
+                    df.columns = [c.lower() for c in df.columns]
+                    
+                    current_date = datetime.now()
+                    
+                    for index, row in df.iterrows():
+                        try:
+                            date_str = str(row.get('date', ''))
+                            # Format is vaak "Dec 12, 2024"
+                            dt = pd.to_datetime(date_str, errors='coerce')
+                            
+                            if pd.isna(dt) or dt > current_date:
+                                continue
+                                
+                            est = row.get('eps est', 0)
+                            rep = row.get('eps', 0) # Soms heet het gewoon 'EPS' voor reported
+                            
+                            if isinstance(est, str): est = float(re.sub(r'[^\d\.-]', '', est))
+                            if isinstance(rep, str): rep = float(re.sub(r'[^\d\.-]', '', rep))
+                            
+                            # Bereken surprise als die ontbreekt
+                            if est != 0:
+                                surp = ((rep - est) / abs(est)) * 100
+                            else:
+                                surp = 0
+                                
                             history.append({
-                                'date': row.get('startdatetime', index).strftime('%Y-%m-%d'),
-                                'reported': row['epsactual'],
-                                'estimate': row['epsestimate'],
-                                'surprise': row['epssurprisepct'] * 100 if 'epssurprisepct' in row else 0
+                                'date': dt.strftime('%Y-%m-%d'),
+                                'reported': rep,
+                                'estimate': est,
+                                'surprise': surp
                             })
-                        history.sort(key=lambda x: x['date'])
-                        return history[-4:]
-                except:
-                    pass
+                        except:
+                            continue
+                            
+                    # Sorteer oud naar nieuw
+                    history.sort(key=lambda x: x['date'])
+                    return history[-4:] # Laatste 4
+            except Exception as e:
+                # Fallback via requests als read_html faalt (bv 403)
+                pass
 
-        except:
+        except Exception:
             pass
         return history
 
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
-        # 1. Nasdaq (Best voor US)
+        # 1. Probeer Stock Analysis (Stock Events data)
+        se_data = get_stock_events_earnings(ticker)
+        if se_data:
+            return se_data
+            
+        # 2. Fallback: Nasdaq
         nasdaq_data = get_nasdaq_earnings(ticker)
         if nasdaq_data:
             return nasdaq_data
-        
-        # 2. Yahoo Scraper / Yfinance fallback (Voor EU)
-        yahoo_data = get_yahoo_scraper_earnings(ticker)
-        if yahoo_data:
-            return yahoo_data
             
         return []
+
+    def get_nasdaq_earnings(ticker):
+        # Oude functie behouden als backup
+        us_ticker = EU_TO_US_MAP.get(ticker, ticker)
+        clean_ticker = us_ticker.split('.')[0]
+        url = f"https://api.nasdaq.com/api/company/{clean_ticker}/earnings-surprise"
+        try:
+            r = requests.get(url, headers=NASDAQ_HEADERS, timeout=5)
+            data = r.json()
+            if data.get('data') and data['data'].get('earningsSurpriseTable'):
+                rows = data['data']['earningsSurpriseTable'].get('rows', [])
+                history = []
+                current_date = datetime.now()
+                for row in rows: 
+                    try:
+                        date_str = row.get('dateReported')
+                        if not date_str: continue
+                        dt = pd.to_datetime(date_str, errors='coerce')
+                        if dt > current_date: continue
+                        eps_rep = row.get('eps')
+                        eps_est = row.get('consensusForecast')
+                        if eps_rep == "N/A" or eps_est == "N/A": continue
+                        val_rep = float(str(eps_rep).replace('$', '').replace(',', ''))
+                        val_est = float(str(eps_est).replace('$', '').replace(',', ''))
+                        history.append({
+                            'dt': dt, 'date': date_str, 'reported': val_rep, 'estimate': val_est,
+                            'surprise': ((val_rep - val_est) / abs(val_est) * 100) if val_est != 0 else 0
+                        })
+                    except: continue
+                history.sort(key=lambda x: x['dt'], reverse=True)
+                history = history[:4]
+                history.reverse()
+                if history: return history
+        except: pass
+        return None
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
@@ -378,9 +374,7 @@ elif st.session_state["authentication_status"]:
             ytd_start_price = None
             current_year = datetime.now().year
             try:
-                # PUNT 2: Correcte YTD referentie ophalen (1 jan)
                 start_of_year = f"{current_year}-01-01"
-                # We pakken een range om zeker te zijn van een slotkoers rond 1 jan
                 hist_ytd = tk.history(start=start_of_year, end=f"{current_year}-01-08", interval="1d")
                 if not hist_ytd.empty:
                     ytd_start_price = hist_ytd['Close'].iloc[0]
@@ -418,23 +412,6 @@ elif st.session_state["authentication_status"]:
             }
         except Exception:
             return None
-
-    @st.cache_data(ttl=86400)
-    def get_historical_price(ticker, date_obj):
-        try:
-            start_date = date_obj - timedelta(days=5)
-            end_date = date_obj + timedelta(days=1)
-            
-            df = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    price = df['Close'].iloc[-1].values[0] 
-                else:
-                    price = df['Close'].iloc[-1]
-                return float(price)
-        except:
-            return 0.0
-        return 0.0
 
     def search_yahoo_strict(query):
         try:
@@ -481,7 +458,11 @@ elif st.session_state["authentication_status"]:
             self.ticker = ticker 
             self.original_ticker = original_ticker 
             self.yf_obj = yf.Ticker(original_ticker)
-            self.yf_info = self.yf_obj.info
+            # Fix voor rate limit crash: fetch info voorzichtig of gebruik fallback
+            try:
+                self.yf_info = self.yf_obj.info
+            except:
+                self.yf_info = {}
             self.finviz_data = get_finviz_data(self.ticker) if "." not in self.ticker else {}
 
         def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity, source_name):
@@ -635,6 +616,10 @@ elif st.session_state["authentication_status"]:
     # TAB 1: ANALYSE
     # --------------------------------------------------
     with tabs[0]:
+        # Fix 2: Gebruik callback om sessie conflict te voorkomen
+        def update_search():
+            st.session_state.search_main = st.session_state.search_input_widget
+
         def run_search():
             query = st.session_state.search_main
             if query:
@@ -647,17 +632,22 @@ elif st.session_state["authentication_status"]:
 
         col_search, col_period = st.columns([3, 1])
         with col_search:
-            search_input = st.text_input(
+            # Gebruik een andere key voor de widget en sync handmatig of via callback
+            st.text_input(
                 "Zoek aandeel (Typ en druk op Enter):", 
-                key="search_main", 
-                on_change=run_search
+                key="search_input_widget", 
+                value=st.session_state.search_main,
+                on_change=update_search
             )
+            # Trigger zoekfunctie als search_main is aangepast
+            run_search()
+
             selected_ticker = None
             if st.session_state['search_results']:
                 selection = st.selectbox("Zoekresultaten:", st.session_state['search_results'])
                 if selection: selected_ticker = selection.split(" | ")[0]
-            elif search_input and "." in search_input:
-                selected_ticker = search_input
+            elif st.session_state.search_main and "." in st.session_state.search_main:
+                selected_ticker = st.session_state.search_main
         
         with col_period:
             chart_period = st.selectbox("Grafiek Periode", ["1mo", "6mo", "1y", "5y", "max"], index=2)
@@ -896,13 +886,10 @@ elif st.session_state["authentication_status"]:
                     if ext_data.get('previous_close'):
                         total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                     
-                    # PUNT 2: YTD Correctie volgens de "Time Weighted / Simple Return Logic"
-                    # Als buy_date < 1 jan dit jaar: Referentie = Koers op 1 jan
-                    # Als buy_date >= 1 jan dit jaar: Referentie = Aankoopkoers (GAK)
                     ytd_ref_price = ext_data.get('ytd_start_price')
                     
                     if buy_date and buy_date >= current_year_date:
-                        ytd_ref_price = avg_price # Gekocht dit jaar, dus YTD start bij aankoop
+                        ytd_ref_price = avg_price 
                     
                     if ytd_ref_price and ytd_ref_price > 0:
                         total_year_change_eur += (live_price - ytd_ref_price) * amount * eur_rate
@@ -1000,7 +987,6 @@ elif st.session_state["authentication_status"]:
                 k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
                 k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
                 
-                # YTD Logic: Verschil in waarde tov referentiepunt
                 ytd_pct = (total_year_change_eur / (total_val_eur - total_year_change_eur) * 100) if (total_val_eur - total_year_change_eur) > 0 else 0.0
                 k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta=f"{ytd_pct:.2f}%")
                 
@@ -1009,7 +995,6 @@ elif st.session_state["authentication_status"]:
                 
                 st.divider()
 
-                # PUNT 3: Donutgrafieken kleiner en labels duidelijk (inside of bottom legend)
                 comp1, comp2, comp3 = st.columns(3)
                 with comp1:
                     st.markdown("**Verdeling: Aandelen vs ETF's**")
@@ -1023,8 +1008,8 @@ elif st.session_state["authentication_status"]:
                     fig_d1.update_traces(marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                     fig_d1.update_layout(
                         showlegend=True,
-                        legend=dict(orientation="h", y=-0.1), # Legenda onder
-                        height=200, # Kleinere hoogte
+                        legend=dict(orientation="h", y=-0.1), 
+                        height=200, 
                         margin=dict(t=0, b=0, l=0, r=0),
                         plot_bgcolor='rgba(0,0,0,0)', 
                         paper_bgcolor='rgba(0,0,0,0)'
@@ -1174,9 +1159,9 @@ elif st.session_state["authentication_status"]:
                         
                         if selected_ticker in earnings_history_store:
                             st.markdown(f"**Earnings Surprise: {long_name}**")
-                            # PUNT 1: Bronvermelding
-                            src_label = "Nasdaq" if "api.nasdaq.com" in requests.get(f"https://api.nasdaq.com/api/company/{selected_ticker}/earnings-surprise", headers=NASDAQ_HEADERS).url else "Yahoo Scraper"
-                            st.caption(f"Bron: {src_label}")
+                            # Bronvermelding update naar Stock Analysis indien gebruikt
+                            src_label = "Stock Analysis" if "stockanalysis.com" in requests.get(f"https://stockanalysis.com/stocks/{selected_ticker}/earnings/", headers=HEADERS).url else "Nasdaq"
+                            st.caption(f"Bron: {src_label} / Nasdaq")
                             
                             hist_data = earnings_history_store[selected_ticker]
                             df_eps = pd.DataFrame(hist_data)
@@ -1283,26 +1268,25 @@ elif st.session_state["authentication_status"]:
                 st.rerun()
 
     # --------------------------------------------------
-    # TAB 3: WISHLIST (Punt 4 & 5)
+    # TAB 3: WISHLIST (Punt 1: Layout aangepast)
     # --------------------------------------------------
     with tabs[2]:
         st.subheader("❤️ Mijn Wishlist")
         if st.session_state['wishlist']:
+            st.info("💡 Tip: Selecteer een regel in de tabel om het aandeel direct te analyseren.")
             
-            # PUNT 4: Gecondenseerde layout (3 kolommen ipv 7)
-            h1, h2, h3 = st.columns([3, 2, 1])
-            h1.markdown("**Ticker & Naam**")
-            h2.markdown("**Data**")
-            h3.markdown("**Actie**")
-            st.divider()
-
-            for i, item in enumerate(st.session_state['wishlist']):
+            wishlist_data = []
+            for item in st.session_state['wishlist']:
                 ticker = item['ticker']
                 name = item['name']
                 
+                # Fetch data
                 w_data = get_extended_portfolio_data(ticker)
                 
                 score_str = "N/A"
+                price = 0.0
+                day_change = 0.0
+                
                 if w_data:
                     us_equivalent = EU_TO_US_MAP.get(ticker, ticker)
                     engine = DataEngine(us_equivalent, ticker)
@@ -1318,44 +1302,77 @@ elif st.session_state["authentication_status"]:
                     
                     score, _ = calculate_ai_score(metrics)
                     score_str = str(score)
-                    
-                    price = w_data.get('live_price', 0)
-                    day_change = w_data.get('day_change_pct', 0)
-                    sym = w_data.get('currency_symbol', '')
-                else:
-                    price = 0
-                    day_change = 0
-                    sym = ""
+                    price = w_data.get('live_price', 0) or 0.0
+                    day_change = w_data.get('day_change_pct', 0) or 0.0
 
-                c1, c2, c3 = st.columns([3, 2, 1])
+                wishlist_data.append({
+                    "Verwijder": False,
+                    "Ticker": ticker,
+                    "Naam": name,
+                    "Huidige Koers": price,
+                    "Dag %": day_change / 100.0, # Delen door 100 voor percentage kolom
+                    "AI Score": score_str
+                })
+            
+            df_wishlist = pd.DataFrame(wishlist_data)
+            
+            # Layout configureren zoals portfolio
+            col_config = {
+                "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False),
+                "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
+                "Naam": st.column_config.TextColumn("Naam", disabled=True),
+                "Huidige Koers": st.column_config.NumberColumn("Koers", format="%.2f", disabled=True),
+                "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f%%", disabled=True),
+                "AI Score": st.column_config.TextColumn("AI Score", disabled=True)
+            }
+            
+            # Gebruik data_editor met selection_mode voor "clickable vergrootglas" effect
+            edited_wishlist = st.data_editor(
+                df_wishlist,
+                column_config=col_config,
+                hide_index=True,
+                use_container_width=True,
+                key="wishlist_editor",
+                on_change=None, # Geen directe change callback nodig voor delete, we doen dat na check
+                selection_mode="single-row" # Hiermee selecteer je een rij voor analyse
+            )
+            
+            # Logic voor Verwijderen
+            if not df_wishlist.equals(edited_wishlist):
+                # Check of er iets verwijderd moet worden
+                new_wishlist_state = []
+                # We itereren over de edited_wishlist
+                # Let op: edited_wishlist is een DF
+                for idx, row in edited_wishlist.iterrows():
+                    if not row['Verwijder']:
+                        # Vind het originele item in st.session_state['wishlist']
+                        # We gaan ervan uit dat de volgorde behouden blijft
+                        if idx < len(st.session_state['wishlist']):
+                             new_wishlist_state.append(st.session_state['wishlist'][idx])
                 
-                with c1:
-                    st.write(f"**{ticker}**")
-                    st.caption(name)
-                
-                with c2:
-                    color_style = "green" if day_change >= 0 else "red"
-                    st.write(f"{sym} {price:.2f}")
-                    st.markdown(f"<span style='color:{color_style}'>{day_change:+.2f}%</span> | AI: **{score_str}**", unsafe_allow_html=True)
-                
-                with c3:
-                    # PUNT 5: Fix voor search icon error
-                    # We gebruiken een callback structuur of gewoon een simpele check
-                    if st.button("🔍", key=f"an_{i}"):
-                        st.session_state.search_main = ticker
-                        st.toast(f"Geladen: {ticker}. Ga naar tab Analyse.", icon="🚀")
-                        # Geen rerun hier nodig, state is gezet.
+                if len(new_wishlist_state) != len(st.session_state['wishlist']):
+                    st.session_state['wishlist'] = new_wishlist_state
+                    save_portfolio_to_db()
+                    st.rerun()
+
+            # Logic voor Analyseren (via selectie)
+            # Check de selection state van de data_editor widget
+            if "wishlist_editor" in st.session_state and st.session_state["wishlist_editor"].get("selection", {}).get("rows"):
+                selected_rows = st.session_state["wishlist_editor"]["selection"]["rows"]
+                if selected_rows:
+                    row_idx = selected_rows[0]
+                    ticker_to_analyze = wishlist_data[row_idx]["Ticker"]
                     
-                    if st.button("🗑️", key=f"del_wl_{i}"): 
-                        st.session_state['wishlist'].pop(i)
-                        save_portfolio_to_db()
-                        st.rerun()
-                
-                st.divider()
+                    # Update search state veilig
+                    st.session_state.search_main = ticker_to_analyze
+                    # Reset selection om herhaalde triggers te voorkomen bij refresh
+                    # Helaas is selection resetten lastig, dus we sturen gebruiker gewoon door
+                    st.toast(f"Analyse geladen voor {ticker_to_analyze}! Ga naar het Analyse tabblad.", icon="🚀")
+
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING (Punt 6)
+    # TAB 4: BELASTING (Punt 3: Rate limit fix)
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
@@ -1368,39 +1385,67 @@ elif st.session_state["authentication_status"]:
             savings_amount = st.number_input("Spaargeld op 1 januari (€)", value=10000.0, step=1000.0)
             savings_yield_pct = st.number_input("Rendement op spaargeld (%)", value=1.03, step=0.01)
 
-        # PUNT 6: Handmatige aanpassing mogelijk maken. 
-        # Waardes worden opgeslagen in session_state en alleen overschreven bij druk op knop.
-        
         with c_inp2:
             st.markdown(f"**Portfolio Waarde (Aandelen)**")
             
-            # Button om auto-calculate te triggeren
             if st.button("🔄 Bereken op basis van portfolio"):
                 calc_jan1 = 0.0
                 calc_dec31 = 0.0
                 d_jan1 = date(tax_year, 1, 1)
                 d_dec31 = date(tax_year, 12, 31)
                 
-                with st.spinner("Koersen ophalen..."):
-                    for p in st.session_state['portfolio']:
-                        ticker = p['ticker']
-                        amount = p['amount']
-                        buy_date = p.get('buy_date')
-                        currency = p.get('currency', 'EUR')
-                        rate = get_currency_rate(currency, "EUR")
-
-                        if buy_date and buy_date < d_jan1:
-                            calc_jan1 += (get_historical_price(ticker, d_jan1) * amount * rate)
-                        
-                        if buy_date and buy_date <= d_dec31:
-                            calc_dec31 += (get_historical_price(ticker, d_dec31) * amount * rate)
+                # FIX voor Rate Limit: Bulk Download
+                tickers_list = [p['ticker'] for p in st.session_state['portfolio']]
                 
+                if tickers_list:
+                    with st.spinner("Koersen ophalen (Bulk)..."):
+                        # Download alles in 1x om rate limits te voorkomen
+                        # We pakken een ruime marge rondom de jaarwisseling
+                        start_dl = date(tax_year - 1, 12, 25)
+                        end_dl = date(tax_year + 1, 1, 10)
+                        
+                        try:
+                            bulk_data = yf.download(tickers_list, start=start_dl, end=end_dl, group_by='ticker', progress=False)
+                            
+                            for p in st.session_state['portfolio']:
+                                ticker = p['ticker']
+                                amount = p['amount']
+                                buy_date = p.get('buy_date')
+                                currency = p.get('currency', 'EUR')
+                                rate = get_currency_rate(currency, "EUR")
+
+                                # Helper om prijs uit bulk dataframe te halen
+                                def get_price_from_bulk(t, d):
+                                    try:
+                                        # Als er maar 1 ticker is, is de structuur anders (geen MultiIndex op hoogste niveau)
+                                        if len(tickers_list) == 1:
+                                            df_t = bulk_data
+                                        else:
+                                            df_t = bulk_data[t]
+                                            
+                                        # Zoek dichtstbijzijnde datum (ffill voor laatste slotkoers)
+                                        # We filteren op data tot datum d en pakken de laatste
+                                        valid_rows = df_t[df_t.index.date <= d]
+                                        if not valid_rows.empty:
+                                            return float(valid_rows['Close'].iloc[-1])
+                                    except:
+                                        pass
+                                    return 0.0
+
+                                if buy_date and buy_date < d_jan1:
+                                    calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
+                                
+                                if buy_date and buy_date <= d_dec31:
+                                    calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
+                                    
+                        except Exception as e:
+                            st.error(f"Fout bij ophalen koersen: {e}")
+
                 st.session_state.tax_val_jan1 = calc_jan1
                 st.session_state.tax_val_dec31 = calc_dec31
                 st.success("Waardes bijgewerkt!")
                 st.rerun()
 
-            # Inputs gebruiken session state als default/value
             pf_val_jan1 = st.number_input(f"Waarde 1 jan {tax_year}", value=st.session_state.tax_val_jan1, step=100.0)
             pf_val_dec31 = st.number_input(f"Waarde 31 dec {tax_year}", value=st.session_state.tax_val_dec31, step=100.0)
             

@@ -210,30 +210,30 @@ elif st.session_state["authentication_status"]:
     def get_yahoo_earnings_calendar(ticker):
         """
         Haalt earnings dates op via Yahoo API.
-        Checkt of er data is in het huidige jaar.
+        Checkt dynamisch op relevantie: is er data in de laatste 12 maanden of in de toekomst?
         """
         history = []
         try:
             tk = yf.Ticker(ticker)
-            # earnings_dates geeft een DataFrame met index (Timestamp) en kolommen 'EPS Estimate', 'Reported EPS', 'Surprise(%)'
             df = tk.earnings_dates
             
             if df is not None and not df.empty:
-                # Verwijder tijdzone info voor makkelijke vergelijking
                 if df.index.tz is not None:
                     df.index = df.index.tz_localize(None)
                 
-                current_year = datetime.now().year
+                # Dynamische check: Is er 'levende' data?
+                # We kijken 1 jaar terug. Als alles ouder is, laten we het niet zien.
+                now = datetime.now()
+                cutoff_date = now - timedelta(days=365)
                 
-                # CHECK: Is er data voor het huidige jaar? (Past or Future)
-                has_current_year_data = df[df.index.year == current_year]
+                # Filter: Data die nieuwer is dan 1 jaar geleden (inclusief toekomst)
+                has_relevant_data = df[df.index > cutoff_date]
                 
-                if has_current_year_data.empty:
-                    # Geen earnings bekend voor dit jaar -> return None (Grafiek niet tonen)
+                if has_relevant_data.empty:
+                    # Alleen maar oude data -> Geen grafiek
                     return None
                 
-                # Als er wel data is, bouw de historie voor de grafiek (alleen verleden)
-                now = datetime.now()
+                # Als er wel data is, bouw de historie (alleen verleden voor de grafiek)
                 df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
                 
                 # Sorteer nieuw naar oud voor de head(4)
@@ -257,9 +257,8 @@ elif st.session_state["authentication_status"]:
                         'surprise': float(surp)
                     })
                 
-                # Return oud naar nieuw voor grafiek
                 if history:
-                    history.reverse()
+                    history.reverse() # Oud naar nieuw voor plot
                     return history
         except Exception:
             pass
@@ -267,12 +266,11 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
-        # We gaan direct naar Yahoo zoals gevraagd
-        # Probeer eerst de originele ticker
+        # Direct naar Yahoo
         data = get_yahoo_earnings_calendar(ticker)
         if data: return data
         
-        # Probeer US mapping als fallback
+        # Fallback US mapping
         us_ticker = EU_TO_US_MAP.get(ticker)
         if us_ticker:
             data = get_yahoo_earnings_calendar(us_ticker)
@@ -547,10 +545,9 @@ elif st.session_state["authentication_status"]:
             elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
             
-            # FIX: Direct opslaan naar DB en rerunnen
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
-            time.sleep(1) # Korte pauze voor UX
+            time.sleep(1) 
             st.rerun()
         except Exception as e:
             st.error(f"Fout bij laden bestand: {e}")

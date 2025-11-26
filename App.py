@@ -221,22 +221,15 @@ elif st.session_state["authentication_status"]:
                 if df.index.tz is not None:
                     df.index = df.index.tz_localize(None)
                 
-                # Dynamische check: Is er 'levende' data?
-                # We kijken 1 jaar terug. Als alles ouder is, laten we het niet zien.
                 now = datetime.now()
                 cutoff_date = now - timedelta(days=365)
                 
-                # Filter: Data die nieuwer is dan 1 jaar geleden (inclusief toekomst)
                 has_relevant_data = df[df.index > cutoff_date]
                 
                 if has_relevant_data.empty:
-                    # Alleen maar oude data -> Geen grafiek
                     return None
                 
-                # Als er wel data is, bouw de historie (alleen verleden voor de grafiek)
                 df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
-                
-                # Sorteer nieuw naar oud voor de head(4)
                 df_past = df_past.sort_index(ascending=False)
                 top_4 = df_past.head(4)
                 
@@ -258,7 +251,7 @@ elif st.session_state["authentication_status"]:
                     })
                 
                 if history:
-                    history.reverse() # Oud naar nieuw voor plot
+                    history.reverse() 
                     return history
         except Exception:
             pass
@@ -266,11 +259,9 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
-        # Direct naar Yahoo
         data = get_yahoo_earnings_calendar(ticker)
         if data: return data
         
-        # Fallback US mapping
         us_ticker = EU_TO_US_MAP.get(ticker)
         if us_ticker:
             data = get_yahoo_earnings_calendar(us_ticker)
@@ -545,6 +536,7 @@ elif st.session_state["authentication_status"]:
             elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
             
+            # PUNT 2: Opslaan zodat upload ook persistent is
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
             time.sleep(1) 
@@ -1206,6 +1198,7 @@ elif st.session_state["authentication_status"]:
                     fig_comp = px.line(df_comp, x="Jaar", y=["Portfolio Waarde", "Eigen Inleg"], title="Vermogensgroei Projectie")
                     st.plotly_chart(fig_comp, use_container_width=True)
 
+            # PUNT 1: Wissen maakt ook lokaal bestand leeg
             if st.button("⚠️ Portfolio Volledig Wissen"):
                 st.session_state['portfolio'] = []
                 save_portfolio_to_db()
@@ -1254,8 +1247,8 @@ elif st.session_state["authentication_status"]:
                     "Ticker": ticker,
                     "Naam": name,
                     "Huidige Koers": price,
-                    # FIX: Percentages moeten als fractie (0.015 voor 1.5%) als we %.2f%% gebruiken
-                    "Dag %": day_change / 100.0, 
+                    # PUNT 3 FIX: Geen deling door 100, gewoon de ruwe waarde
+                    "Dag %": day_change, 
                     "AI Score": score_str
                 })
             
@@ -1266,7 +1259,6 @@ elif st.session_state["authentication_status"]:
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Naam": st.column_config.TextColumn("Naam", disabled=True),
                 "Huidige Koers": st.column_config.NumberColumn("Koers", format="%.2f", disabled=True),
-                # FIX: Format zorgt voor juiste weergave
                 "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f %%", disabled=True),
                 "AI Score": st.column_config.TextColumn("AI Score", disabled=True)
             }
@@ -1304,7 +1296,7 @@ elif st.session_state["authentication_status"]:
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING (Punt 4 & 5: Datum Logica & Tarief)
+    # TAB 4: BELASTING
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
@@ -1356,12 +1348,9 @@ elif st.session_state["authentication_status"]:
                                         pass
                                     return 0.0
 
-                                # PUNT 4: FIX DATUM LOGICA
-                                # 1 jan: Alleen aandelen gekocht VOOR 1 jan
                                 if buy_date and buy_date < d_jan1:
                                     calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
                                 
-                                # 31 dec: Aandelen gekocht VOOR of OP 31 dec (dus ook gedurende het jaar)
                                 if buy_date and buy_date <= d_dec31:
                                     calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
                                     
@@ -1380,7 +1369,6 @@ elif st.session_state["authentication_status"]:
             st.session_state.tax_val_dec31 = pf_val_dec31
 
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
-            # PUNT 5: Aanpasbaar Belastingtarief
             belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
 
         st.divider()

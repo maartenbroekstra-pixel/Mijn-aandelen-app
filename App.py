@@ -210,7 +210,7 @@ elif st.session_state["authentication_status"]:
     def get_yahoo_earnings_calendar(ticker):
         """
         Haalt earnings dates op via Yahoo API.
-        Checkt dynamisch op relevantie: is er data in de laatste 12 maanden of in de toekomst?
+        Checkt strikt of er data is voor het huidige jaar of vorig jaar.
         """
         history = []
         try:
@@ -221,14 +221,20 @@ elif st.session_state["authentication_status"]:
                 if df.index.tz is not None:
                     df.index = df.index.tz_localize(None)
                 
-                now = datetime.now()
-                cutoff_date = now - timedelta(days=365)
+                current_year = datetime.now().year
+                prev_year = current_year - 1
                 
-                has_relevant_data = df[df.index > cutoff_date]
+                # STRIKTE CHECK: Bevat de dataset data voor 2024 of 2025?
+                # We kijken naar de index (datums).
+                years_in_data = df.index.year
+                has_recent_data = any((years_in_data == current_year) | (years_in_data == prev_year))
                 
-                if has_relevant_data.empty:
+                if not has_recent_data:
+                    # Geen data voor dit jaar of vorig jaar -> Return None (Geen grafiek)
                     return None
                 
+                # Als er wel recente data is, toon dan de historische prestaties
+                now = datetime.now()
                 df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
                 df_past = df_past.sort_index(ascending=False)
                 top_4 = df_past.head(4)
@@ -536,7 +542,6 @@ elif st.session_state["authentication_status"]:
             elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
             
-            # PUNT 2: Opslaan zodat upload ook persistent is
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
             time.sleep(1) 
@@ -1198,7 +1203,6 @@ elif st.session_state["authentication_status"]:
                     fig_comp = px.line(df_comp, x="Jaar", y=["Portfolio Waarde", "Eigen Inleg"], title="Vermogensgroei Projectie")
                     st.plotly_chart(fig_comp, use_container_width=True)
 
-            # PUNT 1: Wissen maakt ook lokaal bestand leeg
             if st.button("⚠️ Portfolio Volledig Wissen"):
                 st.session_state['portfolio'] = []
                 save_portfolio_to_db()
@@ -1210,7 +1214,7 @@ elif st.session_state["authentication_status"]:
     with tabs[2]:
         st.subheader("❤️ Mijn Wishlist")
         if st.session_state['wishlist']:
-            st.info("💡 Selecteer hieronder welk aandeel je wilt analyseren of verwijderen.")
+            st.info("💡 Hier zie je je favoriete aandelen.")
             
             wishlist_data = []
             for item in st.session_state['wishlist']:
@@ -1247,7 +1251,7 @@ elif st.session_state["authentication_status"]:
                     "Ticker": ticker,
                     "Naam": name,
                     "Huidige Koers": price,
-                    # PUNT 3 FIX: Geen deling door 100, gewoon de ruwe waarde
+                    # FIX: Percentages moeten als fractie (0.015 voor 1.5%) als we %.2f%% gebruiken
                     "Dag %": day_change, 
                     "AI Score": score_str
                 })
@@ -1259,6 +1263,7 @@ elif st.session_state["authentication_status"]:
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Naam": st.column_config.TextColumn("Naam", disabled=True),
                 "Huidige Koers": st.column_config.NumberColumn("Koers", format="%.2f", disabled=True),
+                # FIX: Format zorgt voor juiste weergave
                 "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f %%", disabled=True),
                 "AI Score": st.column_config.TextColumn("AI Score", disabled=True)
             }
@@ -1282,21 +1287,11 @@ elif st.session_state["authentication_status"]:
                     st.session_state['wishlist'] = new_wishlist_state
                     save_portfolio_to_db()
                     st.rerun()
-
-            st.divider()
-            st.subheader("🔎 Details & Analyse")
-            
-            wl_tickers = [item['Ticker'] for item in wishlist_data]
-            selected_wl_ticker = st.selectbox("Selecteer aandeel om te analyseren:", wl_tickers)
-            
-            if st.button(f"🚀 Analyseer {selected_wl_ticker}"):
-                st.session_state.search_main = selected_wl_ticker
-                st.toast(f"Analyse geladen voor {selected_wl_ticker}. Ga naar het 'Analyse' tabblad!", icon="✅")
                 
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING
+    # TAB 4: BELASTING (Punt 4 & 5: Datum Logica & Tarief)
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
@@ -1322,8 +1317,9 @@ elif st.session_state["authentication_status"]:
                 
                 if tickers_list:
                     with st.spinner("Koersen ophalen (Bulk)..."):
-                        start_dl = date(tax_year - 1, 12, 25)
-                        end_dl = date(tax_year + 1, 1, 10)
+                        # Download ruime range om jaarwisselings-slotkoers te vinden (bijv. 29 dec als 1 jan weekend is)
+                        start_dl = date(tax_year - 1, 12, 15)
+                        end_dl = date(tax_year + 1, 1, 15)
                         
                         try:
                             bulk_data = yf.download(tickers_list, start=start_dl, end=end_dl, group_by='ticker', progress=False)
@@ -1341,16 +1337,23 @@ elif st.session_state["authentication_status"]:
                                             df_t = bulk_data
                                         else:
                                             df_t = bulk_data[t]
+                                        
+                                        # Filter tot de datum en neem de laatste
                                         valid_rows = df_t[df_t.index.date <= d]
+                                        
                                         if not valid_rows.empty:
                                             return float(valid_rows['Close'].iloc[-1])
                                     except:
                                         pass
                                     return 0.0
 
+                                # FIX DATUM LOGICA
+                                # 1 jan: Alleen aandelen gekocht VOOR 1 jan
                                 if buy_date and buy_date < d_jan1:
                                     calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
                                 
+                                # 31 dec: Aandelen gekocht VOOR of OP 31 dec
+                                # Als 31 dec in toekomst ligt, wordt 0 teruggegeven door get_price_from_bulk, wat correct is.
                                 if buy_date and buy_date <= d_dec31:
                                     calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
                                     
@@ -1369,6 +1372,7 @@ elif st.session_state["authentication_status"]:
             st.session_state.tax_val_dec31 = pf_val_dec31
 
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
+            # PUNT 5: Aanpasbaar Belastingtarief
             belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
 
         st.divider()

@@ -6,8 +6,9 @@ import plotly.graph_objects as go
 import requests
 import json
 import re
+import os
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import time
 import streamlit_authenticator as stauth
 
@@ -39,28 +40,57 @@ authenticator = stauth.Authenticate(
     cookie_expiry_days=30
 )
 
-# --- INLOGGEN (AANGEPAST VOOR NIEUWE VERSIE) ---
-# 1. Toon de login widget
+# --- AUTOMATISCHE OPSLAG FUNCTIES ---
+DB_FILE = 'portfolio_db.json'
+
+def load_portfolio_from_db():
+    if os.path.exists(DB_FILE):
+        try:
+            with open(DB_FILE, 'r') as f:
+                data = json.load(f)
+                # Converteer datum strings terug naar date objecten indien nodig
+                port = data.get('portfolio', [])
+                for p in port:
+                    if 'buy_date' in p and p['buy_date']:
+                        try:
+                            p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
+                        except:
+                            p['buy_date'] = None
+                return port, data.get('wishlist', [])
+        except:
+            pass
+    return [], []
+
+def save_portfolio_to_db():
+    # Converteer date objecten naar strings voor JSON serialisatie
+    serializable_port = []
+    for p in st.session_state['portfolio']:
+        p_copy = p.copy()
+        if 'buy_date' in p_copy and isinstance(p_copy['buy_date'], (date, datetime)):
+            p_copy['buy_date'] = p_copy['buy_date'].strftime("%Y-%m-%d")
+        serializable_port.append(p_copy)
+        
+    data = {
+        'portfolio': serializable_port,
+        'wishlist': st.session_state.get('wishlist', [])
+    }
+    with open(DB_FILE, 'w') as f:
+        json.dump(data, f)
+
+# --- INLOGGEN ---
 authenticator.login(location='main')
 
-# 2. Check de status via session_state
 if st.session_state["authentication_status"] is False:
     st.error('Gebruikersnaam of wachtwoord is onjuist')
 elif st.session_state["authentication_status"] is None:
     st.warning('Voer je inloggegevens in')
 
-# 3. Als we ingelogd zijn, toon de app
 elif st.session_state["authentication_status"]:
     
-    # Logout knop in sidebar
     authenticator.logout('Uitloggen', 'sidebar')
-    
-    # Haal de naam op uit session state
     user_name = st.session_state["name"]
     st.sidebar.write(f'Ingelogd als: *{user_name}*')
     st.sidebar.divider()
-
-    # Debug: Toon versie
     st.sidebar.caption(f"Streamlit versie: {st.__version__}")
 
     HEADERS = {
@@ -68,7 +98,7 @@ elif st.session_state["authentication_status"]:
     }
 
     NASDAQ_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
         'Origin': 'https://www.nasdaq.com',
         'Referer': 'https://www.nasdaq.com/'
@@ -95,8 +125,6 @@ elif st.session_state["authentication_status"]:
         "margin": "Nettowinstmarge.\n🟢 > 20%: Hoge winstmarge.",
         "eps": "Winst per aandeel (EPS).\n🟢 > 0: Winstgevend."
     }
-
-    DEFAULT_PORTFOLIO = []
 
     # ==================================================
     # KLEURENPALET: MATTE & MODERN
@@ -128,13 +156,13 @@ elif st.session_state["authentication_status"]:
     }
 
     # ==================================================
-    # 2. STATE MANAGEMENT
+    # 2. STATE MANAGEMENT & INITIAL LOAD
     # ==================================================
-    if 'portfolio' not in st.session_state: 
-        st.session_state['portfolio'] = DEFAULT_PORTFOLIO
-
-    if 'wishlist' not in st.session_state: 
-        st.session_state['wishlist'] = []
+    if 'portfolio' not in st.session_state:
+        # Probeer te laden uit DB
+        p, w = load_portfolio_from_db()
+        st.session_state['portfolio'] = p
+        st.session_state['wishlist'] = w
 
     if 'search_results' not in st.session_state:
         st.session_state['search_results'] = []
@@ -186,6 +214,10 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=3600)
     def get_nasdaq_earnings(ticker):
+        """
+        Haalt earnings op via NASDAQ API. 
+        Dit is nu de primaire bron.
+        """
         us_ticker = EU_TO_US_MAP.get(ticker, ticker)
         clean_ticker = us_ticker.split('.')[0]
         
@@ -198,23 +230,20 @@ elif st.session_state["authentication_status"]:
             if data.get('data') and data['data'].get('earningsSurpriseTable'):
                 rows = data['data']['earningsSurpriseTable'].get('rows', [])
                 history = []
-                current_year = datetime.now().year
+                current_date = datetime.now()
                 
                 for row in rows: 
                     try:
                         date_str = row.get('dateReported')
                         if not date_str: continue
 
-                        # HARD FILTER: Check op jaartal in tekst
-                        year_match = re.search(r'(\d{4})', str(date_str))
-                        if year_match:
-                            y = int(year_match.group(1))
-                            if y < (current_year - 2):
-                                continue # Sla alles ouder dan 2 jaar over
-
                         # Parse datum voor sortering
                         dt = pd.to_datetime(date_str, errors='coerce')
                         
+                        # FILTER: Geen datums in de toekomst
+                        if dt > current_date:
+                            continue
+
                         eps_rep = row.get('eps')
                         eps_est = row.get('consensusForecast')
                         
@@ -258,13 +287,18 @@ elif st.session_state["authentication_status"]:
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
         """
-        Haalt earnings op via yfinance .earnings_dates (API data).
-        Filtert alles uit de toekomst en pakt alleen de laatste 4 kwartalen.
-        Valt terug op Nasdaq indien leeg.
+        Volgorde aangepast:
+        1. EERST Nasdaq
+        2. DAARNA Yahoo (Fallback)
         """
+        # 1. Probeer Nasdaq (Primaire bron)
+        nasdaq_data = get_nasdaq_earnings(ticker)
+        if nasdaq_data:
+            return nasdaq_data['earnings_history']
+
+        # 2. Fallback: Yahoo
         history = []
         try:
-            # 1. Probeer yfinance earnings_dates (Betrouwbaarder dan HTML scrape)
             tickers_to_try = [ticker, EU_TO_US_MAP.get(ticker)]
             tickers_to_try = [t for t in tickers_to_try if t]
             
@@ -273,23 +307,22 @@ elif st.session_state["authentication_status"]:
                 df = tk.earnings_dates
                 
                 if df is not None and not df.empty:
-                    # Verwijder tijdzone
                     if df.index.tz is not None:
                         df.index = df.index.tz_localize(None)
                     
-                    # Filter: Alleen data in het verleden
+                    # FILTER: ZEER STRENG OP DATUM
                     now = datetime.now()
-                    # Sorteer: Nieuwste eerst
-                    df = df.sort_index(ascending=False)
-                    
-                    # Pak alles voor vandaag
+                    # Filter alles in de toekomst eruit (dit lost het Q3 2025 probleem op)
                     df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
+                    
+                    # Sorteer: Nieuwste eerst
+                    df_past = df_past.sort_index(ascending=False)
                     
                     if not df_past.empty:
                         # Pak top 4
                         top_4 = df_past.head(4)
                         
-                        for date, row in top_4.iterrows():
+                        for date_idx, row in top_4.iterrows():
                             # Surprise calculation
                             est = row['EPS Estimate']
                             rep = row['Reported EPS']
@@ -300,25 +333,17 @@ elif st.session_state["authentication_status"]:
                                 surp = ((rep - est) / abs(est)) * 100
 
                             history.append({
-                                'date': date.strftime('%Y-%m-%d'),
+                                'date': date_idx.strftime('%Y-%m-%d'),
                                 'reported': float(rep),
                                 'estimate': float(est),
                                 'surprise': float(surp)
                             })
                         
-                        # We hebben data gevonden, stop met zoeken
                         if history:
-                            # Voor de grafiek willen we oud -> nieuw
-                            history.reverse()
+                            history.reverse() # Oud naar nieuw
                             return history
         except Exception:
             pass
-            
-        # 2. Fallback: Nasdaq (Indien yfinance faalt)
-        if not history:
-            nasdaq_data = get_nasdaq_earnings(ticker)
-            if nasdaq_data:
-                return nasdaq_data['earnings_history']
             
         return history
 
@@ -335,7 +360,7 @@ elif st.session_state["authentication_status"]:
                     current_price = fast_info.last_price
                     previous_close = fast_info.previous_close
                     info = {
-                        'quoteType': 'EQUITY', 'sector': 'Onbekend', 
+                        'quoteType': 'EQUITY', 'sector': 'Onbekend', 'country': 'Onbekend',
                         'currencySymbol': '?', 'shortName': ticker, 'longName': ticker
                     }
                 else:
@@ -344,8 +369,10 @@ elif st.session_state["authentication_status"]:
             q_type = info.get('quoteType', 'EQUITY').upper()
             if 'ETF' in q_type: q_type = 'ETF'
             else: q_type = 'Aandeel'
+            
+            # Nieuwe landen data
+            country = info.get('country', 'Onbekend')
                 
-            # GEWIJZIGD: Gebruik nu get_reliable_earnings ipv scraper/nasdaq direct
             earnings_history_list = get_reliable_earnings(ticker)
             earnings_surprise = None
             
@@ -360,8 +387,8 @@ elif st.session_state["authentication_status"]:
                     if hist.index.tz is not None: hist.index = hist.index.tz_localize(None)
                     last_year = datetime.now() - timedelta(days=365)
                     recent_divs = hist[hist.index > last_year]
-                    for date, amount in recent_divs.items():
-                        dividend_months.append({'month': date.month, 'amount': amount})
+                    for date_val, amount in recent_divs.items():
+                        dividend_months.append({'month': date_val.month, 'amount': amount})
             except: pass
 
             ytd_start_price = None
@@ -387,6 +414,7 @@ elif st.session_state["authentication_status"]:
                 'earnings_history': earnings_history_list, 
                 'dividend_history': dividend_months,
                 'sector': info.get('sector', 'ETF/Overig'),
+                'country': country,
                 'live_price': current_price,
                 'target_price': target_price,
                 'previous_close': previous_close,
@@ -554,8 +582,9 @@ elif st.session_state["authentication_status"]:
     # 6. UI: SIDEBAR
     # ==================================================
     st.sidebar.header("📂 Data & Backup")
+    st.sidebar.info("💾 Data wordt nu automatisch lokaal opgeslagen.")
 
-    json_export = json.dumps({'p': st.session_state['portfolio'], 'w': st.session_state['wishlist']})
+    json_export = json.dumps({'p': st.session_state.get('portfolio',[]), 'w': st.session_state.get('wishlist',[])}, default=str)
     st.sidebar.download_button(
         label="⬇️ Download Backup",
         data=json_export,
@@ -567,8 +596,15 @@ elif st.session_state["authentication_status"]:
     if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
         try:
             loaded_data = json.load(uploaded_file)
-            if 'p' in loaded_data: st.session_state['portfolio'] = loaded_data['p']
+            if 'p' in loaded_data: 
+                # Herstel datums
+                port = loaded_data['p']
+                for p in port:
+                    if 'buy_date' in p and p['buy_date']:
+                         p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
+                st.session_state['portfolio'] = port
             if 'w' in loaded_data: st.session_state['wishlist'] = loaded_data['w']
+            save_portfolio_to_db() # Direct opslaan
             st.toast("Data succesvol geladen!", icon="✅")
             st.rerun()
         except Exception as e:
@@ -732,6 +768,8 @@ elif st.session_state["authentication_status"]:
                         with st.form("add_position_form"):
                             amount_input = st.number_input("Aantal stuks", min_value=0.0001, value=10.0, step=1.0)
                             price_input_eur = st.number_input("Aankoopprijs (€)", value=(float(current_price)*rate) if current_price else 0.0)
+                            # NIEUW: Datum input voor YTD
+                            date_input = st.date_input("Aankoopdatum", value=datetime.now())
                             
                             if st.form_submit_button("Opslaan"):
                                 price_native = price_input_eur / rate if rate > 0 else price_input_eur
@@ -740,13 +778,16 @@ elif st.session_state["authentication_status"]:
                                     'amount': amount_input,
                                     'avg_price': price_native,
                                     'currency': raw_currency,
-                                    'symbol': curr_sym
+                                    'symbol': curr_sym,
+                                    'buy_date': date_input
                                 })
+                                save_portfolio_to_db()
                                 st.success(f"{selected_ticker} toegevoegd!")
                                 st.rerun()
                 with col_wish:
                     if st.button("❤️ Zet op Wishlist", use_container_width=True):
                         st.session_state['wishlist'].append({'ticker': selected_ticker, 'name': info.get('shortName', selected_ticker)})
+                        save_portfolio_to_db()
                         st.toast("Toegevoegd aan Wishlist!")
             except Exception as e:
                 st.error(f"Fout: {e}")
@@ -763,6 +804,7 @@ elif st.session_state["authentication_status"]:
             portfolio_data = []
             monthly_div_projection = {i: 0.0 for i in range(1, 13)}
             sector_distribution = {}
+            country_distribution = {}
             
             total_val_eur = 0
             total_cost_eur = 0
@@ -780,6 +822,8 @@ elif st.session_state["authentication_status"]:
 
             progress_bar = st.progress(0, text="Portfolio data analyseren...")
             
+            current_year_date = date(datetime.now().year, 1, 1)
+
             for i, item in enumerate(st.session_state['portfolio']):
                 ticker = item['ticker']
                 progress_bar.progress((i + 1) / len(st.session_state['portfolio']), text=f"Analyseren: {ticker}...")
@@ -797,7 +841,8 @@ elif st.session_state["authentication_status"]:
                         'previous_close': 0, 
                         'ytd_start_price': 0,
                         'type': 'Onbekend', 
-                        'sector': 'Fout', 
+                        'sector': 'Fout',
+                        'country': 'Onbekend',
                         'currency_symbol': item.get('symbol', '?'),
                         'shortName': f"⚠️ {ticker} (Fout)", 
                         'longName': ticker,
@@ -812,6 +857,7 @@ elif st.session_state["authentication_status"]:
                 
                 q_type = ext_data.get('type', 'Aandeel')
                 sector = ext_data.get('sector', 'Onbekend')
+                country = ext_data.get('country', 'Onbekend')
                 short_name = ext_data.get('shortName', ticker)
                 long_name = ext_data.get('longName', ticker)
                 
@@ -819,6 +865,8 @@ elif st.session_state["authentication_status"]:
                 avg_price = item['avg_price']
                 currency = item.get('currency', 'EUR')
                 symbol = item.get('symbol', '€')
+                buy_date = item.get('buy_date', None)
+
                 eur_rate = get_currency_rate(currency, "EUR")
                 
                 val_native = live_price * amount
@@ -842,9 +890,15 @@ elif st.session_state["authentication_status"]:
                     if ext_data.get('previous_close'):
                         total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
                     
-                    # 2. YTD
-                    if ext_data.get('ytd_start_price'):
-                        total_year_change_eur += (live_price - ext_data['ytd_start_price']) * amount * eur_rate
+                    # 2. YTD (Aangepaste Logica)
+                    ytd_ref_price = ext_data.get('ytd_start_price')
+                    
+                    # Als aankoopdatum dit jaar is, is de YTD referentie de aankoopkoers, niet 1 jan
+                    if buy_date and buy_date >= current_year_date:
+                        ytd_ref_price = avg_price # Gebruik GAK als 'start' voor dit aandeel
+                    
+                    if ytd_ref_price:
+                        total_year_change_eur += (live_price - ytd_ref_price) * amount * eur_rate
 
                 # Dividend
                 yearly_div_eur = 0
@@ -862,6 +916,7 @@ elif st.session_state["authentication_status"]:
                 total_div_eur += yearly_div_eur
                 
                 sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
+                country_distribution[country] = country_distribution.get(country, 0) + val_eur
 
                 if q_type == 'ETF':
                     etf_stats['value'] += val_eur
@@ -909,6 +964,7 @@ elif st.session_state["authentication_status"]:
                     "Waarde (€)": val_eur,
                     "Winst (€)": profit_eur,
                     "Div/Jaar (€)": yearly_div_eur,
+                    "Datum": buy_date,
                     "Earnings": earnings_str,
                     "_earnings_color": earnings_color,
                     "Sector": sector,
@@ -944,9 +1000,9 @@ elif st.session_state["authentication_status"]:
                 k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
                 k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
                 
-                # AANGEPAST: Delta is nu het daadwerkelijke bedrag, zodat kleur/pijl klopt
+                # YTD Logic
                 ytd_start_value = total_val_eur - total_year_change_eur
-                ytd_pct = (total_year_change_eur / ytd_start_value * 100) if ytd_start_value != 0 else 0.0
+                ytd_pct = (total_year_change_eur / ytd_start_value * 100) if ytd_start_value > 0 else 0.0
                 k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta=f"{ytd_pct:.2f}%")
                 
                 k6.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
@@ -954,7 +1010,7 @@ elif st.session_state["authentication_status"]:
                 
                 st.divider()
 
-                comp1, comp2 = st.columns(2)
+                comp1, comp2, comp3 = st.columns(3)
                 with comp1:
                     st.markdown("**Verdeling: Aandelen vs ETF's**")
                     etf_prof_pct = (etf_stats['profit'] / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
@@ -963,12 +1019,11 @@ elif st.session_state["authentication_status"]:
                     c_a.metric("ETF's Waarde", f"€ {etf_stats['value']:,.0f}", delta=f"{etf_prof_pct:.1f}%")
                     c_b.metric("Losse Aandelen", f"€ {stock_stats['value']:,.0f}", delta=f"{stock_prof_pct:.1f}%")
                     
-                    # UPDATED: Matte Donut Chart
                     fig_d1 = go.Figure(data=[go.Pie(labels=['ETF', 'Aandelen'], values=[etf_stats['value'], stock_stats['value']], hole=.7)])
                     fig_d1.update_traces(textinfo='percent+label', marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                     fig_d1.update_layout(
                         showlegend=True, 
-                        height=300, 
+                        height=250, 
                         margin=dict(t=0, b=0, l=0, r=0),
                         plot_bgcolor='rgba(0,0,0,0)', 
                         paper_bgcolor='rgba(0,0,0,0)'
@@ -978,17 +1033,30 @@ elif st.session_state["authentication_status"]:
                 with comp2:
                     st.markdown("**Sectoren**")
                     if sector_distribution:
-                        # UPDATED: Matte Donut Chart 2
                         fig_d2 = go.Figure(data=[go.Pie(labels=list(sector_distribution.keys()), values=list(sector_distribution.values()), hole=.7)])
                         fig_d2.update_traces(textinfo='percent', marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
                         fig_d2.update_layout(
                             showlegend=True, 
-                            height=300, 
+                            height=250, 
                             margin=dict(t=0, b=0, l=0, r=0),
                             plot_bgcolor='rgba(0,0,0,0)', 
                             paper_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_d2, use_container_width=True)
+                
+                with comp3:
+                    st.markdown("**Landenverdeling**")
+                    if country_distribution:
+                        fig_d3 = go.Figure(data=[go.Pie(labels=list(country_distribution.keys()), values=list(country_distribution.values()), hole=.7)])
+                        fig_d3.update_traces(textinfo='percent+label')
+                        fig_d3.update_layout(
+                            showlegend=False, 
+                            height=250, 
+                            margin=dict(t=0, b=0, l=0, r=0),
+                            plot_bgcolor='rgba(0,0,0,0)', 
+                            paper_bgcolor='rgba(0,0,0,0)'
+                        )
+                        st.plotly_chart(fig_d3, use_container_width=True)
 
             # ---------------------------
             # SECTIE 2: Dividend
@@ -1026,7 +1094,7 @@ elif st.session_state["authentication_status"]:
             # SECTIE 3: Aandelen Tabel & Details (Dropdown)
             # ---------------------------
             with st.expander("📋 Aandelen & Details", expanded=True):
-                st.info("💡 Bewerk 'GAK (€)' of 'Aantal' in de tabel. Selecteer een aandeel daaronder voor details.")
+                st.info("💡 Bewerk 'GAK (€)', 'Aantal' of 'Datum' in de tabel. Selecteer een aandeel daaronder voor details.")
                 
                 df_editor_source = pd.DataFrame(portfolio_data)
                 column_settings = {
@@ -1039,6 +1107,7 @@ elif st.session_state["authentication_status"]:
                     "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
                     "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
                     "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
+                    "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY"),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
                     "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
@@ -1047,7 +1116,7 @@ elif st.session_state["authentication_status"]:
                 edited_df = st.data_editor(
                     df_editor_source, 
                     column_config=column_settings, 
-                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Earnings"), 
+                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Datum", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Earnings"), 
                     hide_index=True, 
                     use_container_width=True, 
                     key="main_portfolio_editor"
@@ -1072,21 +1141,21 @@ elif st.session_state["authentication_status"]:
                                 'amount': row['Aantal'], 
                                 'avg_price': new_avg_price, 
                                 'currency': row['_currency_code'], 
-                                'symbol': row['Valuta']
+                                'symbol': row['Valuta'],
+                                'buy_date': row['Datum']
                             })
                     st.session_state['portfolio'] = new_state_portfolio
+                    save_portfolio_to_db()
                     st.rerun()
 
                 # DETAIL SELECTIE (FILTER)
                 st.divider()
                 st.subheader("🔎 Details per Aandeel")
                 
-                # Map namen naar tickers voor de dropdown
                 available_tickers = [item['Ticker'] for item in portfolio_data]
                 ticker_to_name = {item['Ticker']: item['Naam'] for item in portfolio_data}
                 
                 if available_tickers:
-                    # AANGEPAST: Dropdown toont nu "Bedrijfsnaam (Ticker)" ipv alleen Ticker
                     selected_ticker = st.selectbox(
                         "Selecteer een aandeel:", 
                         available_tickers,
@@ -1145,14 +1214,12 @@ elif st.session_state["authentication_status"]:
                             diff = rep - est
                             pct = latest['surprise']
                             
-                            # Gebruik kolommen zodat het een 'matrix' onder de grafiek vormt
                             m1, m2, m3, m4 = st.columns(4)
                             
                             m1.metric("Verwacht EPS", f"{est:.2f}")
                             m2.metric("Werkelijk EPS", f"{rep:.2f}")
                             m3.metric("Verschil", f"{diff:+.2f}")
                             
-                            # AANGEPAST: Geen getal onder het percentage, alleen kleur, met juiste fontgrootte
                             color_pct = MATTE_COLORS["green"] if pct > 0 else MATTE_COLORS["red"]
                             m4.markdown(
                                 f"""
@@ -1212,6 +1279,7 @@ elif st.session_state["authentication_status"]:
 
             if st.button("⚠️ Portfolio Volledig Wissen"):
                 st.session_state['portfolio'] = []
+                save_portfolio_to_db()
                 st.rerun()
 
     # --------------------------------------------------
@@ -1236,7 +1304,10 @@ elif st.session_state["authentication_status"]:
                         c1.write(f"**{ticker}**")
                         c2.write(name)
                         c3.markdown(f"{currency_sym} {price:.2f} (<span style='color:{color_style}'>{pct_change:+.2f}%</span>)", unsafe_allow_html=True)
-                        if c4.button("🗑️", key=f"del_wl_{i}"): st.session_state['wishlist'].pop(i); st.rerun()
+                        if c4.button("🗑️", key=f"del_wl_{i}"): 
+                            st.session_state['wishlist'].pop(i)
+                            save_portfolio_to_db()
+                            st.rerun()
                         if i < len(st.session_state['wishlist']) - 1: st.divider()
                     except: st.error(f"Kon data voor {ticker} niet laden.")
         else: st.info("Je wishlist is nog leeg.")

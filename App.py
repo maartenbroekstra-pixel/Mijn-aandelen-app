@@ -256,134 +256,71 @@ elif st.session_state["authentication_status"]:
         return None
 
     @st.cache_data(ttl=3600)
-    def scrape_yahoo_analysis_html(ticker):
+    def get_reliable_earnings(ticker):
         """
-        Verbeterde scraper voor Yahoo Earnings History.
-        Bevat nu een HARDE filter op jaartallen in de tekst om 2000-2005 data te voorkomen.
+        Haalt earnings op via yfinance .earnings_dates (API data).
+        Filtert alles uit de toekomst en pakt alleen de laatste 4 kwartalen.
+        Valt terug op Nasdaq indien leeg.
         """
+        history = []
         try:
-            url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
-            dfs = pd.read_html(url, storage_options={'User-Agent': HEADERS['User-Agent']})
-            raw_history = []
-            current_year = datetime.now().year
+            # 1. Probeer yfinance earnings_dates (Betrouwbaarder dan HTML scrape)
+            tickers_to_try = [ticker, EU_TO_US_MAP.get(ticker)]
+            tickers_to_try = [t for t in tickers_to_try if t]
             
-            for df in dfs:
-                cols = [str(c).lower().replace('.', '') for c in df.columns]
+            for t_try in tickers_to_try:
+                tk = yf.Ticker(t_try)
+                df = tk.earnings_dates
                 
-                # Check 1: Verticale Tabel (Earnings History)
-                if any('eps est' in c for c in cols) and any('eps actual' in c for c in cols):
-                    date_col = next((i for i, c in enumerate(cols) if 'date' in c), 0)
-                    est_col = next((i for i, c in enumerate(cols) if 'eps est' in c), None)
-                    act_col = next((i for i, c in enumerate(cols) if 'eps actual' in c), None)
-                    surp_col = next((i for i, c in enumerate(cols) if 'surprise' in c), None)
+                if df is not None and not df.empty:
+                    # Verwijder tijdzone
+                    if df.index.tz is not None:
+                        df.index = df.index.tz_localize(None)
                     
-                    if est_col is not None and act_col is not None:
-                        for idx, row in df.iterrows():
-                            try:
-                                act_val = row.iloc[act_col]
-                                if pd.isna(act_val) or str(act_val).strip() == '-': continue
-                                
-                                # Datum string ophalen
-                                date_str = str(row.iloc[date_col])
-
-                                # HARDE FILTER: Check op jaartal in tekst (Regex)
-                                # Dit voorkomt dat '04' als 2004 wordt gelezen als pandas in de war is,
-                                # of dat oude data überhaupt wordt verwerkt.
-                                year_match = re.search(r'(\d{4})', date_str)
-                                if year_match:
-                                    year_val = int(year_match.group(1))
-                                    # Als data ouder is dan huidig jaar - 2 (bv 2022), negeren.
-                                    if year_val < (current_year - 2):
-                                        continue
-
-                                dt = pd.to_datetime(date_str, errors='coerce')
-
-                                est_val = float(str(row.iloc[est_col]))
-                                act_val = float(str(act_val))
-                                
-                                surp_val = row.iloc[surp_col] if surp_col is not None else 0
-                                if isinstance(surp_val, str):
-                                    surp_val = float(surp_val.replace('%', '').replace(',', ''))
-                                else:
-                                    surp_val = float(surp_val)
-
-                                raw_history.append({
-                                    'dt': dt,
-                                    'date': date_str,
-                                    'reported': act_val,
-                                    'estimate': est_val,
-                                    'surprise': surp_val
-                                })
-                            except: continue
-
-                # Check 2: Horizontale Tabel
-                s_df = df.astype(str)
-                if s_df.apply(lambda x: x.str.contains('EPS Est', case=False)).any().any():
-                    try:
-                        df.set_index(df.columns[0], inplace=True)
-                        est_row = df.loc[df.index.str.contains("EPS Est", case=False, na=False)].iloc[0]
-                        act_row = df.loc[df.index.str.contains("EPS Actual", case=False, na=False)].iloc[0]
-                        surp_row_matches = df.index.str.contains("Surprise", case=False, na=False)
+                    # Filter: Alleen data in het verleden
+                    now = datetime.now()
+                    # Sorteer: Nieuwste eerst
+                    df = df.sort_index(ascending=False)
+                    
+                    # Pak alles voor vandaag
+                    df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
+                    
+                    if not df_past.empty:
+                        # Pak top 4
+                        top_4 = df_past.head(4)
                         
-                        surp_row = None
-                        if surp_row_matches.any():
-                            surp_row = df.loc[surp_row_matches].iloc[0]
+                        for date, row in top_4.iterrows():
+                            # Surprise calculation
+                            est = row['EPS Estimate']
+                            rep = row['Reported EPS']
+                            surp = row['Surprise(%)'] if 'Surprise(%)' in row and not pd.isna(row['Surprise(%)']) else 0
+                            
+                            # Als surprise niet in de data zit, zelf berekenen
+                            if surp == 0 and est != 0:
+                                surp = ((rep - est) / abs(est)) * 100
 
-                        for col_date in df.columns:
-                            try:
-                                act_val = float(act_row[col_date])
-                                if pd.isna(act_val): continue
-
-                                date_str = str(col_date)
-                                # HARDE FILTER ook hier
-                                year_match = re.search(r'(\d{4})', date_str)
-                                if year_match:
-                                    year_val = int(year_match.group(1))
-                                    if year_val < (current_year - 2):
-                                        continue
-
-                                est_val = float(est_row[col_date])
-                                dt = pd.to_datetime(date_str, errors='coerce')
-                                
-                                surp_val = 0.0
-                                if surp_row is not None:
-                                    raw_surp = str(surp_row[col_date]).replace('%', '')
-                                    if raw_surp != '-' and raw_surp != 'N/A':
-                                        surp_val = float(raw_surp)
-                                
-                                raw_history.append({
-                                    'dt': dt,
-                                    'date': date_str,
-                                    'reported': act_val,
-                                    'estimate': est_val,
-                                    'surprise': surp_val
-                                })
-                            except: continue
-                    except: pass
-            
-            # --- FILTER EN SORTEER LOGICA ---
-            if raw_history:
-                # 1. Verwijder rijen zonder geldige datum
-                valid_hist = [h for h in raw_history if not pd.isna(h['dt'])]
-                
-                # 2. Sorteer op datum: Nieuwste eerst
-                valid_hist.sort(key=lambda x: x['dt'], reverse=True)
-                
-                # 3. Dubbele check op datumobject (voor zekerheid)
-                cutoff_date = datetime.now() - timedelta(days=800) # Iets ruimer dan 2 jaar
-                recent_hist = [h for h in valid_hist if h['dt'] > cutoff_date]
-                
-                # 4. Pak maximaal de laatste 4
-                final_slice = recent_hist[:4]
-                
-                # 5. Reverse terug (Oud -> Nieuw) voor correcte grafiek
-                final_slice.reverse()
-                
-                return final_slice
-
+                            history.append({
+                                'date': date.strftime('%Y-%m-%d'),
+                                'reported': float(rep),
+                                'estimate': float(est),
+                                'surprise': float(surp)
+                            })
+                        
+                        # We hebben data gevonden, stop met zoeken
+                        if history:
+                            # Voor de grafiek willen we oud -> nieuw
+                            history.reverse()
+                            return history
         except Exception:
             pass
-        return []
+            
+        # 2. Fallback: Nasdaq (Indien yfinance faalt)
+        if not history:
+            nasdaq_data = get_nasdaq_earnings(ticker)
+            if nasdaq_data:
+                return nasdaq_data['earnings_history']
+            
+        return history
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
@@ -408,58 +345,13 @@ elif st.session_state["authentication_status"]:
             if 'ETF' in q_type: q_type = 'ETF'
             else: q_type = 'Aandeel'
                 
-            earnings_data = get_nasdaq_earnings(ticker)
+            # GEWIJZIGD: Gebruik nu get_reliable_earnings ipv scraper/nasdaq direct
+            earnings_history_list = get_reliable_earnings(ticker)
             earnings_surprise = None
-            earnings_history_list = []
             
-            if earnings_data:
-                earnings_history_list = earnings_data['earnings_history']
-                earnings_surprise = earnings_data['last_surprise']
-            else:
-                try:
-                    scraped_hist = scrape_yahoo_analysis_html(ticker)
-                    if not scraped_hist:
-                         us_tick = EU_TO_US_MAP.get(ticker)
-                         if us_tick: scraped_hist = scrape_yahoo_analysis_html(us_tick)
-                    
-                    if scraped_hist:
-                        earnings_history_list = scraped_hist
-                        # Lijst is nu Oud -> Nieuw door de logica in scrape_yahoo_analysis_html
-                        if earnings_history_list:
-                            last = earnings_history_list[-1] 
-                            earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
-                except: pass
-
-                if not earnings_history_list:
-                    try:
-                        tickers_to_try = [EU_TO_US_MAP.get(ticker), ticker]
-                        tickers_to_try = [t for t in tickers_to_try if t] 
-
-                        for t_try in tickers_to_try:
-                            earning_tk = yf.Ticker(t_try)
-                            dates = earning_tk.earnings_dates
-                            
-                            if dates is not None and not dates.empty:
-                                if dates.index.tz is not None: dates.index = dates.index.tz_localize(None)
-                                now = datetime.now()
-                                past_dates = dates[dates.index < now].sort_index(ascending=False)
-                                valid = past_dates.dropna(subset=['Reported EPS', 'EPS Estimate']).head(4)
-                                
-                                if not valid.empty:
-                                    for date, row in valid.iterrows():
-                                        earnings_history_list.append({
-                                            'date': date.strftime('%Y-%m-%d'),
-                                            'reported': row['Reported EPS'],
-                                            'estimate': row['EPS Estimate'],
-                                            'surprise': row['Surprise(%)'] * 100 if abs(row['Surprise(%)']) < 5 else row['Surprise(%)']
-                                        })
-                                    
-                                    earnings_history_list.reverse()
-                                    if earnings_history_list:
-                                        last = earnings_history_list[-1]
-                                        earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
-                                    break 
-                    except: pass
+            if earnings_history_list:
+                last = earnings_history_list[-1]
+                earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
 
             dividend_months = []
             try:

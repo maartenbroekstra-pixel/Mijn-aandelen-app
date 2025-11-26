@@ -198,11 +198,19 @@ elif st.session_state["authentication_status"]:
             if data.get('data') and data['data'].get('earningsSurpriseTable'):
                 rows = data['data']['earningsSurpriseTable'].get('rows', [])
                 history = []
+                current_year = datetime.now().year
                 
                 for row in rows: 
                     try:
                         date_str = row.get('dateReported')
                         if not date_str: continue
+
+                        # HARD FILTER: Check op jaartal in tekst
+                        year_match = re.search(r'(\d{4})', str(date_str))
+                        if year_match:
+                            y = int(year_match.group(1))
+                            if y < (current_year - 2):
+                                continue # Sla alles ouder dan 2 jaar over
 
                         # Parse datum voor sortering
                         dt = pd.to_datetime(date_str, errors='coerce')
@@ -251,17 +259,18 @@ elif st.session_state["authentication_status"]:
     def scrape_yahoo_analysis_html(ticker):
         """
         Verbeterde scraper voor Yahoo Earnings History.
-        Parseert datums, filtert oude data (max 2 jaar) en limiteert tot 4 kwartalen.
+        Bevat nu een HARDE filter op jaartallen in de tekst om 2000-2005 data te voorkomen.
         """
         try:
             url = f"https://finance.yahoo.com/quote/{ticker}/analysis"
             dfs = pd.read_html(url, storage_options={'User-Agent': HEADERS['User-Agent']})
             raw_history = []
+            current_year = datetime.now().year
             
             for df in dfs:
                 cols = [str(c).lower().replace('.', '') for c in df.columns]
                 
-                # Check 1: Verticale Tabel (Earnings History) - Standaard formaat
+                # Check 1: Verticale Tabel (Earnings History)
                 if any('eps est' in c for c in cols) and any('eps actual' in c for c in cols):
                     date_col = next((i for i, c in enumerate(cols) if 'date' in c), 0)
                     est_col = next((i for i, c in enumerate(cols) if 'eps est' in c), None)
@@ -274,8 +283,19 @@ elif st.session_state["authentication_status"]:
                                 act_val = row.iloc[act_col]
                                 if pd.isna(act_val) or str(act_val).strip() == '-': continue
                                 
-                                # Datum parsen
+                                # Datum string ophalen
                                 date_str = str(row.iloc[date_col])
+
+                                # HARDE FILTER: Check op jaartal in tekst (Regex)
+                                # Dit voorkomt dat '04' als 2004 wordt gelezen als pandas in de war is,
+                                # of dat oude data überhaupt wordt verwerkt.
+                                year_match = re.search(r'(\d{4})', date_str)
+                                if year_match:
+                                    year_val = int(year_match.group(1))
+                                    # Als data ouder is dan huidig jaar - 2 (bv 2022), negeren.
+                                    if year_val < (current_year - 2):
+                                        continue
+
                                 dt = pd.to_datetime(date_str, errors='coerce')
 
                                 est_val = float(str(row.iloc[est_col]))
@@ -296,7 +316,7 @@ elif st.session_state["authentication_status"]:
                                 })
                             except: continue
 
-                # Check 2: Horizontale Tabel (Oude stijl of alternatieve view)
+                # Check 2: Horizontale Tabel
                 s_df = df.astype(str)
                 if s_df.apply(lambda x: x.str.contains('EPS Est', case=False)).any().any():
                     try:
@@ -314,8 +334,16 @@ elif st.session_state["authentication_status"]:
                                 act_val = float(act_row[col_date])
                                 if pd.isna(act_val): continue
 
+                                date_str = str(col_date)
+                                # HARDE FILTER ook hier
+                                year_match = re.search(r'(\d{4})', date_str)
+                                if year_match:
+                                    year_val = int(year_match.group(1))
+                                    if year_val < (current_year - 2):
+                                        continue
+
                                 est_val = float(est_row[col_date])
-                                dt = pd.to_datetime(str(col_date), errors='coerce')
+                                dt = pd.to_datetime(date_str, errors='coerce')
                                 
                                 surp_val = 0.0
                                 if surp_row is not None:
@@ -325,7 +353,7 @@ elif st.session_state["authentication_status"]:
                                 
                                 raw_history.append({
                                     'dt': dt,
-                                    'date': str(col_date),
+                                    'date': date_str,
                                     'reported': act_val,
                                     'estimate': est_val,
                                     'surprise': surp_val
@@ -341,8 +369,8 @@ elif st.session_state["authentication_status"]:
                 # 2. Sorteer op datum: Nieuwste eerst
                 valid_hist.sort(key=lambda x: x['dt'], reverse=True)
                 
-                # 3. Filter data ouder dan 2 jaar (730 dagen) om 2001-toestanden te voorkomen
-                cutoff_date = datetime.now() - timedelta(days=730)
+                # 3. Dubbele check op datumobject (voor zekerheid)
+                cutoff_date = datetime.now() - timedelta(days=800) # Iets ruimer dan 2 jaar
                 recent_hist = [h for h in valid_hist if h['dt'] > cutoff_date]
                 
                 # 4. Pak maximaal de laatste 4

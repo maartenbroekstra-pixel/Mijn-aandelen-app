@@ -1372,11 +1372,15 @@ elif st.session_state["authentication_status"]:
             st.session_state.tax_val_dec31 = pf_val_dec31
 
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
-            # PUNT 5: Aanpasbaar Belastingtarief
             belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
+            
+            # NIEUW: Handmatig percentage voor de berekening
+            # Standaard op 6.04% (fictief rendement beleggingen 2024), maar aanpasbaar naar werkelijk
+            rendement_pct_input = st.number_input("Rendement voor Belasting (% - Forfaitair of Werkelijk)", value=6.04, step=0.01)
 
         st.divider()
         
+        # Berekening werkelijke resultaten (ter info)
         stock_gain = pf_val_dec31 - pf_val_jan1
         stock_return_pct = (stock_gain / pf_val_jan1 * 100) if pf_val_jan1 > 0 else 0.0
         
@@ -1386,25 +1390,26 @@ elif st.session_state["authentication_status"]:
         total_gain = stock_gain + savings_gain
         total_return_pct = (total_gain / total_assets_start * 100) if total_assets_start > 0 else 0.0
 
+        # Berekening voor de Belasting
         grondslag = max(0, total_assets_start - heffingsvrij)
+        
+        # Aangepaste formule: Grondslag * Opgegeven Percentage
+        belastbaar_rendement = grondslag * (rendement_pct_input / 100)
+        te_betalen = belastbaar_rendement * (belasting_tarief / 100)
         
         st.subheader("📊 Belastingberekening")
         
         col_res1, col_res2, col_res3 = st.columns(3)
         col_res1.metric("Totaal Vermogen 1 jan", f"€ {total_assets_start:,.2f}")
-        col_res2.metric("Werkelijk Rendement (Totaal)", f"€ {total_gain:,.2f}", f"{total_return_pct:.2f}%")
+        col_res2.metric("Werkelijk Behaald Rendement", f"€ {total_gain:,.2f}", f"{total_return_pct:.2f}%", help="Dit is wat je daadwerkelijk hebt verdiend (koerswinst + spaarrente).")
         
-        percentage_belast = grondslag / total_assets_start if total_assets_start > 0 else 0
-        belastbaar_rendement = total_gain * percentage_belast
-        te_betalen = belastbaar_rendement * (belasting_tarief / 100)
-        
-        col_res3.metric("Belastbaar Rendement", f"€ {belastbaar_rendement:,.2f}", help="Rendement toegerekend aan deel boven heffingsvrij")
+        col_res3.metric("Belastbaar Bedrag", f"€ {belastbaar_rendement:,.2f}", help=f"Berekend als: (Vermogen - Heffingsvrij) * {rendement_pct_input}%")
         
         st.divider()
         final_c1, final_c2 = st.columns(2)
-        final_c1.info(f"Rendement Spaargeld: € {savings_gain:.2f}\nRendement Beleggingen: € {stock_gain:.2f}")
+        final_c1.info(f"**Werkelijk resultaat:**\nRendement Spaargeld: € {savings_gain:.2f}\nRendement Beleggingen: € {stock_gain:.2f}")
         
         final_c2.markdown(f"""
         ### 💶 Te Betalen: € {te_betalen:,.2f}
-        *Berekend als: Belastbaar Rendement × {belasting_tarief}%*
-        """)
+        *Berekend als: Belastbaar Bedrag (€ {belastbaar_rendement:,.2f}) × {belasting_tarief}%*
+        """) 

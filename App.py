@@ -21,7 +21,7 @@ st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon
 names = ['Eigenaar']
 usernames = ['admin']
 # Wachtwoord is 'admin'
-passwords = ['$2b$12$rMeMz.5s/08S2o/e5Jp7EO.3yZ.s.y.o.w.n.o.t.h.i.n.g'] 
+passwords = ['6f9a2b8c4d1e7f3a9b0c5e8d2f1a4c7b9e0d1f3a6b8c5d2e7f9a1b0c4e8d2f'] 
 
 hashed_passwords = passwords
 credentials = {

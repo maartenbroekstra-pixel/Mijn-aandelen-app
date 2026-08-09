@@ -342,6 +342,7 @@ elif st.session_state["authentication_status"]:
                 'target_price': target_price,
                 'previous_close': previous_close,
                 'ytd_start_price': ytd_start_price,
+                'currency_code': info.get('currency', 'EUR'),
                 'currency_symbol': info.get('currencySymbol', '€'),
                 'shortName': info.get('shortName', ticker),
                 'longName': info.get('longName', ticker),
@@ -391,24 +392,25 @@ elif st.session_state["authentication_status"]:
     def parse_tr_csv(uploaded_file):
         df = pd.read_csv(uploaded_file)
         
-        # ISIN to YF Ticker Mapping
         isin_to_yf = {
             "IE00BK5BQT80": "VWCE.DE", "US0567521085": "BIDU", "US7223041028": "PDD",
             "NL0012015705": "TKWY.AS", "US2546871060": "DIS", "US4581401001": "INTC",
             "US6541061031": "NKE", "US7170811035": "PFE", "US70450Y1038": "PYPL",
             "US8336351056": "SQM", "NL0010273215": "ASML.AS", "IE0003XJA0J9": "WEBN.DE",
             "NL0000009165": "HEIA.AS", "US01609W1027": "BABA", "US7134481081": "PEP",
-            "DE0007664005": "VOW3.DE", "US7960508882": "SMSN.IL", "US47215P1066": "JD",
+            "DE0007664005": "VOW3.DE", "US7960508882": "SSUN.F", "US47215P1066": "JD",
             "US4781601046": "JNJ", "DK0062498333": "NOVO-B.CO", "GB00BP6MXD84": "SHELL.AS",
             "US0079031078": "AMD", "US0231351067": "AMZN", "NL0012866412": "BESI.AS",
             "NL0000395903": "WKL.AS", "US02079K3059": "GOOGL", "US68389X1054": "ORCL",
             "US5949181045": "MSFT", "US5324571083": "LLY", "ES0119037010": "CBAV.MC",
-            "KYG4124C1096": "GRAB", "US79466L3024": "CRM"
+            "KYG4124C1096": "GRAB", "US79466L3024": "CRM", "US5504241051": "LAZR", 
+            "US5504243032": "LAZR"
         }
         
         portfolio_dict = {}
         
-        df_trades = df[df['type'].isin(['BUY', 'SELL', 'MIGRATION']) & df['asset_class'].isin(['STOCK', 'FUND'])]
+        # INCLUSIEF REVERSE SPLIT EN MIGRATION
+        df_trades = df[df['type'].isin(['BUY', 'SELL', 'MIGRATION', 'REVERSE_SPLIT', 'SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])]
         
         for _, row in df_trades.iterrows():
             isin = row['symbol']
@@ -883,23 +885,24 @@ elif st.session_state["authentication_status"]:
                 
                 amount = item['amount']
                 avg_price = item['avg_price']
-                currency = item.get('currency', 'EUR')
-                symbol = item.get('symbol', '€')
+                
+                currency_code = ext_data.get('currency_code', 'EUR')
+                symbol = ext_data.get('currency_symbol', '€')
                 buy_date = item.get('buy_date', None)
 
-                eur_rate = get_currency_rate(currency, "EUR")
+                eur_rate = get_currency_rate(currency_code, "EUR")
                 
                 val_native = live_price * amount
-                cost_native = avg_price * amount
                 val_eur = val_native * eur_rate
-                cost_eur = cost_native * eur_rate
+                
+                cost_eur = avg_price * amount
                 profit_eur = val_eur - cost_eur
                 
                 used_target = target_price if target_price else live_price
                 potential_eur = used_target * amount * eur_rate
                 total_potential_eur += potential_eur
                 
-                gak_eur = avg_price * eur_rate
+                gak_eur = avg_price 
 
                 total_val_eur += val_eur
                 total_cost_eur += cost_eur
@@ -983,7 +986,7 @@ elif st.session_state["authentication_status"]:
                     "_earnings_color": earnings_color,
                     "Sector": sector,
                     "Valuta": symbol,
-                    "_currency_code": currency,
+                    "_currency_code": currency_code,
                     "_rate": eur_rate, 
                     "Verwijder": False
                 })
@@ -1017,7 +1020,6 @@ elif st.session_state["authentication_status"]:
                 
                 st.divider()
                 
-                # ETF's vs Aandelen Rendement toegevoegd
                 st.markdown("### 📊 Rendement: ETF's vs Aandelen")
                 col_etf, col_stock = st.columns(2)
                 

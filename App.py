@@ -408,25 +408,36 @@ elif st.session_state["authentication_status"]:
         
         portfolio_dict = {}
         
-        df_trades = df[df['type'].isin(['BUY', 'SELL']) & df['asset_class'].isin(['STOCK', 'FUND'])]
+        df_trades = df[df['type'].isin(['BUY', 'SELL', 'MIGRATION']) & df['asset_class'].isin(['STOCK', 'FUND'])]
         
         for _, row in df_trades.iterrows():
             isin = row['symbol']
-            shares = float(row['shares']) if pd.notna(row['shares']) else 0.0
-            price = float(row['price']) if pd.notna(row['price']) else 0.0
-            t_type = row['type']
-            date_val = datetime.strptime(row['date'], "%Y-%m-%d").date()
+            
+            try: shares_raw = float(row['shares'])
+            except: shares_raw = 0.0
+                
+            try: price = float(row['price'])
+            except: price = 0.0
+                
+            try: date_val = datetime.strptime(str(row['date']).split('T')[0], "%Y-%m-%d").date()
+            except: date_val = datetime.now().date()
             
             if isin not in portfolio_dict:
                 portfolio_dict[isin] = {'shares': 0.0, 'total_invested': 0.0, 'date': date_val}
             
-            if t_type == 'BUY':
-                portfolio_dict[isin]['shares'] += shares
-                portfolio_dict[isin]['total_invested'] += (shares * price)
-            elif t_type == 'SELL':
-                portfolio_dict[isin]['shares'] -= shares
-                if portfolio_dict[isin]['shares'] > 0:
-                    portfolio_dict[isin]['total_invested'] -= (shares * (portfolio_dict[isin]['total_invested'] / (portfolio_dict[isin]['shares'] + shares)))
+            if shares_raw > 0:
+                portfolio_dict[isin]['shares'] += shares_raw
+                portfolio_dict[isin]['total_invested'] += (shares_raw * price)
+            elif shares_raw < 0:
+                abs_shares = abs(shares_raw)
+                old_shares = portfolio_dict[isin]['shares']
+                portfolio_dict[isin]['shares'] -= abs_shares
+                
+                if portfolio_dict[isin]['shares'] < 0:
+                    portfolio_dict[isin]['shares'] = 0.0
+                    
+                if old_shares > 0:
+                    portfolio_dict[isin]['total_invested'] -= (abs_shares * (portfolio_dict[isin]['total_invested'] / old_shares))
                 else:
                     portfolio_dict[isin]['total_invested'] = 0.0
                     
@@ -568,7 +579,7 @@ elif st.session_state["authentication_status"]:
     st.sidebar.header("📂 Data & Backup")
     st.sidebar.info("💾 Data wordt nu automatisch lokaal opgeslagen.")
 
-    # --- CSV UPLOADER TOEVOEGEN ---
+    # --- CSV UPLOADER ---
     uploaded_csv = st.sidebar.file_uploader("📈 Importeer Broker CSV", type=['csv'], help="Upload je Trade Republic transactie-export")
     if uploaded_csv and st.sidebar.button("Verwerk CSV"):
         try:
@@ -576,7 +587,7 @@ elif st.session_state["authentication_status"]:
             if parsed_portfolio:
                 st.session_state['portfolio'] = parsed_portfolio
                 save_portfolio_to_db()
-                st.sidebar.success(f"{len(parsed_portfolio)} posities ingeladen!")
+                st.sidebar.success(f"{len(parsed_portfolio)} posities succesvol ingeladen!")
                 time.sleep(1)
                 st.rerun()
             else:
@@ -808,7 +819,7 @@ elif st.session_state["authentication_status"]:
     # --------------------------------------------------
     with tabs[1]:
         if not st.session_state['portfolio']:
-            st.info("Je portfolio is leeg. Voeg aandelen toe via de Analyse tab of via een CSV import.")
+            st.info("Je portfolio is leeg. Voeg aandelen toe via de Analyse tab of upload je CSV in het menu.")
         else:
             st.markdown("### 📊 Portfolio Dashboard Pro")
             
@@ -1004,6 +1015,20 @@ elif st.session_state["authentication_status"]:
                 k6.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
                 k7.metric("Portfolio Yield", f"{yield_pct:.2f}%")
                 
+                st.divider()
+                
+                # ETF's vs Aandelen Rendement toegevoegd
+                st.markdown("### 📊 Rendement: ETF's vs Aandelen")
+                col_etf, col_stock = st.columns(2)
+                
+                etf_pct = (etf_stats['profit'] / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
+                stock_pct = (stock_stats['profit'] / stock_stats['cost'] * 100) if stock_stats['cost'] > 0 else 0
+                
+                with col_etf:
+                    st.metric("ETF Rendement (Absoluut)", f"€ {etf_stats['profit']:,.2f}", f"{etf_pct:.1f}%")
+                with col_stock:
+                    st.metric("Aandelen Rendement (Absoluut)", f"€ {stock_stats['profit']:,.2f}", f"{stock_pct:.1f}%")
+                    
                 st.divider()
 
                 comp1, comp2, comp3 = st.columns(3)

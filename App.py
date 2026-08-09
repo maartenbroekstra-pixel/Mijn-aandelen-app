@@ -208,10 +208,6 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=3600)
     def get_yahoo_earnings_calendar(ticker):
-        """
-        Haalt earnings dates op via Yahoo API.
-        Checkt strikt of er data is voor het huidige jaar of vorig jaar.
-        """
         history = []
         try:
             tk = yf.Ticker(ticker)
@@ -224,16 +220,12 @@ elif st.session_state["authentication_status"]:
                 current_year = datetime.now().year
                 prev_year = current_year - 1
                 
-                # STRIKTE CHECK: Bevat de dataset data voor 2024 of 2025?
-                # We kijken naar de index (datums).
                 years_in_data = df.index.year
                 has_recent_data = any((years_in_data == current_year) | (years_in_data == prev_year))
                 
                 if not has_recent_data:
-                    # Geen data voor dit jaar of vorig jaar -> Return None (Geen grafiek)
                     return None
                 
-                # Als er wel recente data is, toon dan de historische prestaties
                 now = datetime.now()
                 df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
                 df_past = df_past.sort_index(ascending=False)
@@ -395,6 +387,64 @@ elif st.session_state["authentication_status"]:
             vids = re.findall(r"watch\?v=(\S{11})", r.text)
             return vids[0] if vids else None
         except: return None
+        
+    def parse_tr_csv(uploaded_file):
+        df = pd.read_csv(uploaded_file)
+        
+        # ISIN to YF Ticker Mapping
+        isin_to_yf = {
+            "IE00BK5BQT80": "VWCE.DE", "US0567521085": "BIDU", "US7223041028": "PDD",
+            "NL0012015705": "TKWY.AS", "US2546871060": "DIS", "US4581401001": "INTC",
+            "US6541061031": "NKE", "US7170811035": "PFE", "US70450Y1038": "PYPL",
+            "US8336351056": "SQM", "NL0010273215": "ASML.AS", "IE0003XJA0J9": "WEBN.DE",
+            "NL0000009165": "HEIA.AS", "US01609W1027": "BABA", "US7134481081": "PEP",
+            "DE0007664005": "VOW3.DE", "US7960508882": "SMSN.IL", "US47215P1066": "JD",
+            "US4781601046": "JNJ", "DK0062498333": "NOVO-B.CO", "GB00BP6MXD84": "SHELL.AS",
+            "US0079031078": "AMD", "US0231351067": "AMZN", "NL0012866412": "BESI.AS",
+            "NL0000395903": "WKL.AS", "US02079K3059": "GOOGL", "US68389X1054": "ORCL",
+            "US5949181045": "MSFT", "US5324571083": "LLY", "ES0119037010": "CBAV.MC",
+            "KYG4124C1096": "GRAB", "US79466L3024": "CRM"
+        }
+        
+        portfolio_dict = {}
+        
+        df_trades = df[df['type'].isin(['BUY', 'SELL']) & df['asset_class'].isin(['STOCK', 'FUND'])]
+        
+        for _, row in df_trades.iterrows():
+            isin = row['symbol']
+            shares = float(row['shares']) if pd.notna(row['shares']) else 0.0
+            price = float(row['price']) if pd.notna(row['price']) else 0.0
+            t_type = row['type']
+            date_val = datetime.strptime(row['date'], "%Y-%m-%d").date()
+            
+            if isin not in portfolio_dict:
+                portfolio_dict[isin] = {'shares': 0.0, 'total_invested': 0.0, 'date': date_val}
+            
+            if t_type == 'BUY':
+                portfolio_dict[isin]['shares'] += shares
+                portfolio_dict[isin]['total_invested'] += (shares * price)
+            elif t_type == 'SELL':
+                portfolio_dict[isin]['shares'] -= shares
+                if portfolio_dict[isin]['shares'] > 0:
+                    portfolio_dict[isin]['total_invested'] -= (shares * (portfolio_dict[isin]['total_invested'] / (portfolio_dict[isin]['shares'] + shares)))
+                else:
+                    portfolio_dict[isin]['total_invested'] = 0.0
+                    
+        new_portfolio = []
+        for isin, data in portfolio_dict.items():
+            if data['shares'] > 0.01: 
+                ticker = isin_to_yf.get(isin, isin)
+                avg_price = data['total_invested'] / data['shares'] if data['shares'] > 0 else 0
+                
+                new_portfolio.append({
+                    'ticker': ticker,
+                    'amount': data['shares'],
+                    'avg_price': avg_price,
+                    'currency': 'EUR', 
+                    'symbol': '€',
+                    'buy_date': data['date']
+                })
+        return new_portfolio
 
     # ==================================================
     # 4. DATA ENGINE
@@ -518,15 +568,33 @@ elif st.session_state["authentication_status"]:
     st.sidebar.header("📂 Data & Backup")
     st.sidebar.info("💾 Data wordt nu automatisch lokaal opgeslagen.")
 
+    # --- CSV UPLOADER TOEVOEGEN ---
+    uploaded_csv = st.sidebar.file_uploader("📈 Importeer Broker CSV", type=['csv'], help="Upload je Trade Republic transactie-export")
+    if uploaded_csv and st.sidebar.button("Verwerk CSV"):
+        try:
+            parsed_portfolio = parse_tr_csv(uploaded_csv)
+            if parsed_portfolio:
+                st.session_state['portfolio'] = parsed_portfolio
+                save_portfolio_to_db()
+                st.sidebar.success(f"{len(parsed_portfolio)} posities ingeladen!")
+                time.sleep(1)
+                st.rerun()
+            else:
+                st.sidebar.warning("Geen geldige transacties gevonden in CSV.")
+        except Exception as e:
+            st.sidebar.error(f"Fout bij verwerken CSV: {e}")
+
+    st.sidebar.divider()
+
     json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[])}, default=str)
     st.sidebar.download_button(
-        label="⬇️ Download Backup",
+        label="⬇️ Download Backup (JSON)",
         data=json_export,
         file_name="aandelen_backup.json",
         mime="application/json"
     )
 
-    uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup", type=['json'])
+    uploaded_file = st.sidebar.file_uploader("⬆️ Upload Backup (JSON)", type=['json'])
     if uploaded_file and st.sidebar.button("📂 Data Inladen / Herstellen"):
         try:
             loaded_data = json.load(uploaded_file)
@@ -740,7 +808,7 @@ elif st.session_state["authentication_status"]:
     # --------------------------------------------------
     with tabs[1]:
         if not st.session_state['portfolio']:
-            st.info("Je portfolio is leeg. Voeg aandelen toe via de Analyse tab.")
+            st.info("Je portfolio is leeg. Voeg aandelen toe via de Analyse tab of via een CSV import.")
         else:
             st.markdown("### 📊 Portfolio Dashboard Pro")
             
@@ -1209,7 +1277,7 @@ elif st.session_state["authentication_status"]:
                 st.rerun()
 
     # --------------------------------------------------
-    # TAB 3: WISHLIST (Punt 3: Percentage Fix)
+    # TAB 3: WISHLIST 
     # --------------------------------------------------
     with tabs[2]:
         st.subheader("❤️ Mijn Wishlist")
@@ -1221,7 +1289,6 @@ elif st.session_state["authentication_status"]:
                 ticker = item['ticker']
                 name = item['name']
                 
-                # Fetch data
                 w_data = get_extended_portfolio_data(ticker)
                 
                 score_str = "N/A"
@@ -1251,7 +1318,6 @@ elif st.session_state["authentication_status"]:
                     "Ticker": ticker,
                     "Naam": name,
                     "Huidige Koers": price,
-                    # FIX: Percentages moeten als fractie (0.015 voor 1.5%) als we %.2f%% gebruiken
                     "Dag %": day_change, 
                     "AI Score": score_str
                 })
@@ -1263,7 +1329,6 @@ elif st.session_state["authentication_status"]:
                 "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
                 "Naam": st.column_config.TextColumn("Naam", disabled=True),
                 "Huidige Koers": st.column_config.NumberColumn("Koers", format="%.2f", disabled=True),
-                # FIX: Format zorgt voor juiste weergave
                 "Dag %": st.column_config.NumberColumn("Dag %", format="%.2f %%", disabled=True),
                 "AI Score": st.column_config.TextColumn("AI Score", disabled=True)
             }
@@ -1291,7 +1356,7 @@ elif st.session_state["authentication_status"]:
         else: st.info("Je wishlist is nog leeg.")
 
     # --------------------------------------------------
-    # TAB 4: BELASTING (Punt 4 & 5: Datum Logica & Tarief)
+    # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
         st.header("🇳🇱 Box 3 Belasting Checker")
@@ -1317,7 +1382,6 @@ elif st.session_state["authentication_status"]:
                 
                 if tickers_list:
                     with st.spinner("Koersen ophalen (Bulk)..."):
-                        # Download ruime range om jaarwisselings-slotkoers te vinden (bijv. 29 dec als 1 jan weekend is)
                         start_dl = date(tax_year - 1, 12, 15)
                         end_dl = date(tax_year + 1, 1, 15)
                         
@@ -1338,7 +1402,6 @@ elif st.session_state["authentication_status"]:
                                         else:
                                             df_t = bulk_data[t]
                                         
-                                        # Filter tot de datum en neem de laatste
                                         valid_rows = df_t[df_t.index.date <= d]
                                         
                                         if not valid_rows.empty:
@@ -1347,13 +1410,9 @@ elif st.session_state["authentication_status"]:
                                         pass
                                     return 0.0
 
-                                # FIX DATUM LOGICA
-                                # 1 jan: Alleen aandelen gekocht VOOR 1 jan
                                 if buy_date and buy_date < d_jan1:
                                     calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
                                 
-                                # 31 dec: Aandelen gekocht VOOR of OP 31 dec
-                                # Als 31 dec in toekomst ligt, wordt 0 teruggegeven door get_price_from_bulk, wat correct is.
                                 if buy_date and buy_date <= d_dec31:
                                     calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
                                     
@@ -1373,14 +1432,10 @@ elif st.session_state["authentication_status"]:
 
             heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
             belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
-            
-            # NIEUW: Handmatig percentage voor de berekening
-            # Standaard op 6.04% (fictief rendement beleggingen 2024), maar aanpasbaar naar werkelijk
             rendement_pct_input = st.number_input("Rendement voor Belasting (% - Forfaitair of Werkelijk)", value=6.04, step=0.01)
 
         st.divider()
         
-        # Berekening werkelijke resultaten (ter info)
         stock_gain = pf_val_dec31 - pf_val_jan1
         stock_return_pct = (stock_gain / pf_val_jan1 * 100) if pf_val_jan1 > 0 else 0.0
         
@@ -1390,10 +1445,7 @@ elif st.session_state["authentication_status"]:
         total_gain = stock_gain + savings_gain
         total_return_pct = (total_gain / total_assets_start * 100) if total_assets_start > 0 else 0.0
 
-        # Berekening voor de Belasting
         grondslag = max(0, total_assets_start - heffingsvrij)
-        
-        # Aangepaste formule: Grondslag * Opgegeven Percentage
         belastbaar_rendement = grondslag * (rendement_pct_input / 100)
         te_betalen = belastbaar_rendement * (belasting_tarief / 100)
         

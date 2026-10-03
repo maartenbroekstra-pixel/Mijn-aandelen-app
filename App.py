@@ -92,7 +92,7 @@ elif st.session_state["authentication_status"]:
     st.sidebar.caption(f"Streamlit versie: {st.__version__}")
 
     HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     }
 
     EU_TO_US_MAP = {
@@ -118,29 +118,17 @@ elif st.session_state["authentication_status"]:
     }
 
     MATTE_COLORS = {
-        "blue": "#457B9D",      
-        "green": "#2A9D8F",     
-        "red": "#E76F51",       
-        "yellow": "#E9C46A",    
-        "charcoal": "#264653",  
-        "orange": "#F4A261",    
-        "purple": "#9B5DE5",    
-        "grey": "#A8DADC"       
+        "blue": "#457B9D", "green": "#2A9D8F", "red": "#E76F51", "yellow": "#E9C46A",    
+        "charcoal": "#264653", "orange": "#F4A261", "purple": "#9B5DE5", "grey": "#A8DADC"       
     }
 
     SECTOR_COLORS = {
-        "Technology": MATTE_COLORS["blue"],
-        "Financial Services": MATTE_COLORS["charcoal"],
-        "Healthcare": MATTE_COLORS["green"],
-        "Consumer Cyclical": MATTE_COLORS["red"],
-        "Industrials": MATTE_COLORS["purple"],
-        "Consumer Defensive": MATTE_COLORS["orange"],
-        "Energy": MATTE_COLORS["yellow"],
-        "Communication Services": "#D62828", 
-        "Real Estate": "#8D6E63",           
-        "Basic Materials": "#5F9EA0",        
-        "Utilities": "#76FF03",              
-        "ETF/Overig": "#B0BEC5"              
+        "Technology": MATTE_COLORS["blue"], "Financial Services": MATTE_COLORS["charcoal"],
+        "Healthcare": MATTE_COLORS["green"], "Consumer Cyclical": MATTE_COLORS["red"],
+        "Industrials": MATTE_COLORS["purple"], "Consumer Defensive": MATTE_COLORS["orange"],
+        "Energy": MATTE_COLORS["yellow"], "Communication Services": "#D62828", 
+        "Real Estate": "#8D6E63", "Basic Materials": "#5F9EA0",        
+        "Utilities": "#76FF03", "ETF/Overig": "#B0BEC5"              
     }
 
     # ==================================================
@@ -152,12 +140,8 @@ elif st.session_state["authentication_status"]:
         st.session_state['wishlist'] = w
         st.session_state['dca_history'] = d
 
-    if 'search_results' not in st.session_state:
-        st.session_state['search_results'] = []
-    
-    if 'search_main' not in st.session_state:
-        st.session_state['search_main'] = ""
-    
+    if 'search_results' not in st.session_state: st.session_state['search_results'] = []
+    if 'search_main' not in st.session_state: st.session_state['search_main'] = ""
     if 'tax_val_jan1' not in st.session_state: st.session_state.tax_val_jan1 = 0.0
     if 'tax_val_dec31' not in st.session_state: st.session_state.tax_val_dec31 = 0.0
 
@@ -173,10 +157,7 @@ elif st.session_state["authentication_status"]:
             if r.status_code == 200:
                 def parse(label):
                     m = re.search(rf'>{label}</td>.*?<b>\s*([\d\.-]+)\s*</b>', r.text, re.DOTALL)
-                    if m and m.group(1) != '-':
-                        return float(m.group(1))
-                    return None
-                
+                    return float(m.group(1)) if m and m.group(1) != '-' else None
                 d['peg'] = parse('PEG')
                 d['target'] = parse('Target Price')
                 d['eps'] = parse('EPS \(ttm\)')
@@ -185,25 +166,17 @@ elif st.session_state["authentication_status"]:
                 d['roe'] = parse('ROE') 
                 d['margin'] = parse('Profit Margin')
                 d['div'] = parse('Dividend %')
-        except Exception:
-            pass
+        except: pass
         return d
 
     @st.cache_data(ttl=300)
     def get_currency_rate(from_curr, to_curr="EUR"):
-        if from_curr == to_curr or not from_curr: 
-            return 1.0
+        if from_curr == to_curr or not from_curr: return 1.0
         try:
             ticker = "EURUSD=X" if from_curr == "USD" else f"{from_curr}{to_curr}=X"
             data = yf.Ticker(ticker).history(period="1d")
-            if not data.empty:
-                rate = data['Close'].iloc[-1]
-                if from_curr == "USD": 
-                    return 1.0 / rate 
-                return rate
-            return 1.0
-        except Exception:
-            return 1.0
+            return 1.0 / data['Close'].iloc[-1] if from_curr == "USD" else data['Close'].iloc[-1]
+        except: return 1.0
 
     @st.cache_data(ttl=3600)
     def get_yahoo_earnings_calendar(ticker):
@@ -211,59 +184,31 @@ elif st.session_state["authentication_status"]:
         try:
             tk = yf.Ticker(ticker)
             df = tk.earnings_dates
-            
             if df is not None and not df.empty:
-                if df.index.tz is not None:
-                    df.index = df.index.tz_localize(None)
-                
+                if df.index.tz is not None: df.index = df.index.tz_localize(None)
                 current_year = datetime.now().year
-                prev_year = current_year - 1
+                if not any((df.index.year == current_year) | (df.index.year == current_year - 1)): return None
                 
-                years_in_data = df.index.year
-                has_recent_data = any((years_in_data == current_year) | (years_in_data == prev_year))
-                
-                if not has_recent_data:
-                    return None
-                
-                now = datetime.now()
-                df_past = df[df.index < now].dropna(subset=['Reported EPS', 'EPS Estimate'])
-                df_past = df_past.sort_index(ascending=False)
-                top_4 = df_past.head(4)
-                
-                for date_idx, row in top_4.iterrows():
-                    est = row['EPS Estimate']
-                    rep = row['Reported EPS']
-                    surp = row['Surprise(%)']
-                    
-                    if pd.isna(surp) and est != 0:
-                        surp = ((rep - est) / abs(est)) * 100
-                    elif pd.isna(surp):
-                        surp = 0
-                        
-                    history.append({
-                        'date': date_idx.strftime('%Y-%m-%d'),
-                        'reported': float(rep),
-                        'estimate': float(est),
-                        'surprise': float(surp)
-                    })
-                
+                df_past = df[df.index < datetime.now()].dropna(subset=['Reported EPS', 'EPS Estimate']).sort_index(ascending=False).head(4)
+                for date_idx, row in df_past.iterrows():
+                    est, rep, surp = row['EPS Estimate'], row['Reported EPS'], row['Surprise(%)']
+                    if pd.isna(surp) and est != 0: surp = ((rep - est) / abs(est)) * 100
+                    elif pd.isna(surp): surp = 0
+                    history.append({'date': date_idx.strftime('%Y-%m-%d'), 'reported': float(rep), 'estimate': float(est), 'surprise': float(surp)})
                 if history:
                     history.reverse() 
                     return history
-        except Exception:
-            pass
+        except: pass
         return None
 
     @st.cache_data(ttl=3600)
     def get_reliable_earnings(ticker):
         data = get_yahoo_earnings_calendar(ticker)
         if data: return data
-        
         us_ticker = EU_TO_US_MAP.get(ticker)
         if us_ticker:
             data = get_yahoo_earnings_calendar(us_ticker)
             if data: return data
-            
         return []
     
     @st.cache_data(ttl=86400)
@@ -273,14 +218,10 @@ elif st.session_state["authentication_status"]:
             divs = tk.dividends
             if divs.empty: return 0.0
             if divs.index.tz is not None: divs.index = divs.index.tz_localize(None)
-            
             yearly = divs.resample('YE').sum()
             yearly = yearly[yearly > 0]
             if len(yearly) >= 4:
-                first = yearly.iloc[-4]
-                last = yearly.iloc[-1]
-                cagr = ((last / first) ** (1/3)) - 1
-                return float(cagr * 100)
+                return float((((yearly.iloc[-1] / yearly.iloc[-4]) ** (1/3)) - 1) * 100)
         except: pass
         return 0.0
 
@@ -290,123 +231,75 @@ elif st.session_state["authentication_status"]:
         for t in tickers:
             try:
                 hist = yf.Ticker(t).history(period="1y")
-                if not hist.empty:
-                    df[t] = hist['Close']
+                if not hist.empty: df[t] = hist['Close']
             except: pass
-        if not df.empty and len(df.columns) > 1:
-            return df.pct_change().corr()
-        return None
+        return df.pct_change().corr() if not df.empty and len(df.columns) > 1 else None
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
         try:
             tk = yf.Ticker(ticker)
+            fast_info = tk.fast_info 
             info = tk.info
-            if not isinstance(info, dict):
-                info = {}
-                
-            # --- SUPER FALLBACK: Haal historische chart op als de info API plat ligt ---
-            hist = tk.history(period="5d")
-            hist_price = float(hist['Close'].iloc[-1]) if not hist.empty else 0.0
-            hist_prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else hist_price
             
-            if hist_price == 0.0 and not info.get('currentPrice'):
+            if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
+                if fast_info and fast_info.last_price:
+                    return {'quoteType': 'EQUITY', 'sector': 'Onbekend', 'country': 'Onbekend', 'currencySymbol': '?', 'shortName': ticker, 'longName': ticker, 'live_price': fast_info.last_price, 'previous_close': fast_info.previous_close}
                 return None 
 
-            q_type = 'ETF' if 'ETF' in info.get('quoteType', 'EQUITY', '').upper() else 'Aandeel'
-            country = info.get('country', 'Onbekend')
-                
+            q_type = 'ETF' if 'ETF' in info.get('quoteType', 'EQUITY').upper() else 'Aandeel'
             earnings_history_list = get_reliable_earnings(ticker)
-            earnings_surprise = None
-            if earnings_history_list:
-                last = earnings_history_list[-1]
-                earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
+            earnings_surprise = {'date': earnings_history_list[-1]['date'], 'surprise_pct': earnings_history_list[-1]['surprise']} if earnings_history_list else None
 
             dividend_months = []
             try:
-                hist_div = tk.dividends
-                if not hist_div.empty:
-                    if hist_div.index.tz is not None: hist_div.index = hist_div.index.tz_localize(None)
-                    last_year = datetime.now() - timedelta(days=365)
-                    recent_divs = hist_div[hist_div.index > last_year]
-                    for date_val, amount in recent_divs.items():
-                        dividend_months.append({'month': date_val.month, 'amount': amount})
+                hist = tk.dividends
+                if not hist.empty:
+                    if hist.index.tz is not None: hist.index = hist.index.tz_localize(None)
+                    recent_divs = hist[hist.index > datetime.now() - timedelta(days=365)]
+                    for date_val, amount in recent_divs.items(): dividend_months.append({'month': date_val.month, 'amount': amount})
             except: pass
 
             ytd_start_price = None
-            current_year = datetime.now().year
             try:
-                start_of_year = f"{current_year}-01-01"
-                hist_ytd = tk.history(start=start_of_year, end=f"{current_year}-01-08", interval="1d")
-                if not hist_ytd.empty:
-                    ytd_start_price = hist_ytd['Close'].iloc[0]
+                hist_ytd = tk.history(start=f"{datetime.now().year}-01-01", end=f"{datetime.now().year}-01-08", interval="1d")
+                if not hist_ytd.empty: ytd_start_price = hist_ytd['Close'].iloc[0]
             except: pass
 
-            current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose') or hist_price
-            previous_close = info.get('regularMarketPreviousClose') or hist_prev
-            target_price = info.get('targetMeanPrice')
+            current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose') or (tk.fast_info.last_price if hasattr(tk.fast_info, 'last_price') else 0)
+            previous_close = info.get('regularMarketPreviousClose')
             
             day_change_pct = ((current_price - previous_close) / previous_close * 100) if current_price and previous_close else 0.0
-            
-            currency_code = info.get('currency')
-            if not currency_code:
-                currency_code = 'USD' if '.' not in ticker else 'EUR'
-                
+
             return {
-                'type': q_type,
-                'earnings': earnings_surprise,
-                'earnings_history': earnings_history_list, 
-                'dividend_history': dividend_months,
-                'sector': info.get('sector', 'ETF/Overig'),
-                'country': country,
-                'live_price': current_price,
-                'day_change_pct': day_change_pct,
-                'target_price': target_price,
-                'previous_close': previous_close,
-                'ytd_start_price': ytd_start_price,
-                'currency_code': currency_code,
-                'currency_symbol': info.get('currencySymbol', '€' if currency_code == 'EUR' else '$'),
-                'shortName': info.get('shortName', ticker),
-                'longName': info.get('longName', ticker),
-                'fallback_div_rate': info.get('dividendRate'),
-                'fallback_div_yield': info.get('dividendYield')
+                'type': q_type, 'earnings': earnings_surprise, 'earnings_history': earnings_history_list, 
+                'dividend_history': dividend_months, 'sector': info.get('sector', 'ETF/Overig'),
+                'country': info.get('country', 'Onbekend'), 'live_price': current_price,
+                'day_change_pct': day_change_pct, 'target_price': info.get('targetMeanPrice'),
+                'previous_close': previous_close, 'ytd_start_price': ytd_start_price,
+                'currency_code': info.get('currency', 'EUR'), 'currency_symbol': info.get('currencySymbol', '€'),
+                'shortName': info.get('shortName', ticker), 'longName': info.get('longName', ticker),
+                'fallback_div_rate': info.get('dividendRate'), 'fallback_div_yield': info.get('dividendYield')
             }
-        except Exception:
-            return None
+        except: return None
 
     def search_yahoo_strict(query):
         try:
-            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&quotesCount=15"
-            r = requests.get(url, headers=HEADERS, timeout=3)
-            data = r.json()
-            results = []
-            for q in data.get('quotes', []):
-                results.append(f"{q.get('symbol')} | {q.get('shortname') or q.get('longname')}")
-            return results
+            r = requests.get(f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&lang=en-US&quotesCount=15", headers=HEADERS, timeout=3)
+            return [f"{q.get('symbol')} | {q.get('shortname') or q.get('longname')}" for q in r.json().get('quotes', [])]
         except: return []
 
     def get_google_news(query):
         try:
-            query_encoded = query.replace(' ', '+')
-            url = f"https://news.google.com/rss/search?q={query_encoded}&hl=en-US&gl=US&ceid=US:en"
-            r = requests.get(url, headers=HEADERS, timeout=4)
+            r = requests.get(f"https://news.google.com/rss/search?q={query.replace(' ', '+')}&hl=en-US&gl=US&ceid=US:en", headers=HEADERS, timeout=4)
             root = ET.fromstring(r.content)
-            items = []
-            for i in root.findall('./channel/item')[:3]:
-                items.append({
-                    "title": i.find('title').text,
-                    "link": i.find('link').text,
-                    "date": i.find('pubDate').text[:16]
-                })
-            return items
+            return [{"title": i.find('title').text, "link": i.find('link').text, "date": i.find('pubDate').text[:16]} for i in root.findall('./channel/item')[:3]]
         except: return []
 
     @st.cache_data(ttl=3600)
     def get_youtube_video_id(query):
         try:
-            q = f"{query} stock analysis {datetime.now().year}"
-            url = f"https://www.youtube.com/results?search_query={q.replace(' ','+')}"
-            r = requests.get(url, headers=HEADERS, timeout=5)
+            r = requests.get(f"https://www.youtube.com/results?search_query={query.replace(' ','+')} stick analysis {datetime.now().year}", headers=HEADERS, timeout=5)
             vids = re.findall(r"watch\?v=(\S{11})", r.text)
             return vids[0] if vids else None
         except: return None
@@ -414,7 +307,6 @@ elif st.session_state["authentication_status"]:
     def parse_tr_csv(uploaded_file):
         df = pd.read_csv(uploaded_file)
         
-        # WE ZIJN TERUG NAAR DE ORIGINELE EN BETROUWBARE AMERIKAANSE TICKERS (GEEN .DE OF .F)
         isin_to_yf = {
             "IE00BK5BQT80": "VWCE.DE", "US0567521085": "BIDU", "US7223041028": "PDD",
             "NL0012015705": "TKWY.AS", "US2546871060": "DIS", "US4581401001": "INTC",
@@ -433,7 +325,6 @@ elif st.session_state["authentication_status"]:
         
         portfolio_dict = {}
         dca_history = {}
-        
         df_trades = df[df['type'].isin(['BUY', 'SELL', 'DIVIDEND', 'MIGRATION', 'SPLIT', 'REVERSE_SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])].copy()
         
         for _, row in df_trades.sort_values('date').iterrows():
@@ -443,21 +334,17 @@ elif st.session_state["authentication_status"]:
             
             try: shares_raw = float(row['shares'])
             except: shares_raw = 0.0
-                
             try: price = float(row['price'])
             except: price = 0.0
-                
             try: amount_val = float(row['amount'])
             except: amount_val = 0.0
-                
             try: date_val = datetime.strptime(str(row['date']).split('T')[0], "%Y-%m-%d").date()
             except: date_val = datetime.now().date()
             
-            if pd.isna(isin) or str(isin).strip() == '':
-                continue
+            if pd.isna(isin) or str(isin).strip() == '': continue
             
             if isin not in portfolio_dict:
-                portfolio_dict[isin] = {'shares': 0.0, 'cost_basis': 0.0, 'realized_gain': 0.0, 'dividends': 0.0, 'class': 'FUND' if a_class == 'FUND' else 'Aandeel', 'buy_date': date_val}
+                portfolio_dict[isin] = {'shares': 0.0, 'total_buys': 0.0, 'total_sells': 0.0, 'total_dividends': 0.0, 'class': 'FUND' if a_class == 'FUND' else 'Aandeel', 'buy_date': date_val}
             
             month_str = date_val.strftime('%Y-%m')
             cat = 'ETF' if a_class == 'FUND' else 'Aandeel'
@@ -465,32 +352,20 @@ elif st.session_state["authentication_status"]:
             if t_type == 'BUY':
                 portfolio_dict[isin]['shares'] += shares_raw
                 invested = abs(amount_val) if amount_val != 0 else (shares_raw * price)
-                portfolio_dict[isin]['cost_basis'] += invested
+                portfolio_dict[isin]['total_buys'] += invested
                 
-                if month_str not in dca_history:
-                    dca_history[month_str] = {'ETF': 0, 'Aandeel': 0}
+                if month_str not in dca_history: dca_history[month_str] = {'ETF': 0, 'Aandeel': 0}
                 dca_history[month_str][cat] += invested
                 
             elif t_type == 'SELL':
                 abs_shares = abs(shares_raw)
-                old_shares = portfolio_dict[isin]['shares']
+                portfolio_dict[isin]['shares'] -= abs_shares
+                if portfolio_dict[isin]['shares'] < 0: portfolio_dict[isin]['shares'] = 0.0
                 cash_received = abs(amount_val) if amount_val != 0 else (abs_shares * price)
+                portfolio_dict[isin]['total_sells'] += cash_received
                 
-                if old_shares > 0:
-                    avg_cost = portfolio_dict[isin]['cost_basis'] / old_shares
-                    cost_of_sold = avg_cost * abs_shares
-                    portfolio_dict[isin]['shares'] -= abs_shares
-                    portfolio_dict[isin]['cost_basis'] -= cost_of_sold
-                    portfolio_dict[isin]['realized_gain'] += (cash_received - cost_of_sold)
-                else:
-                    portfolio_dict[isin]['realized_gain'] += cash_received
-                    
-                if portfolio_dict[isin]['shares'] < 0.0001:
-                    portfolio_dict[isin]['shares'] = 0.0
-                    portfolio_dict[isin]['cost_basis'] = 0.0
-                    
             elif t_type == 'DIVIDEND':
-                portfolio_dict[isin]['dividends'] += amount_val
+                portfolio_dict[isin]['total_dividends'] += amount_val
                 
             elif t_type in ['MIGRATION', 'SPLIT', 'REVERSE_SPLIT']:
                 portfolio_dict[isin]['shares'] += shares_raw
@@ -498,15 +373,14 @@ elif st.session_state["authentication_status"]:
         new_portfolio = []
         for isin, data in portfolio_dict.items():
             ticker = isin_to_yf.get(isin, isin)
-            avg_price = data['cost_basis'] / data['shares'] if data['shares'] > 0 else 0
-            
+            net_inleg = data['total_buys'] - data['total_sells']
             new_portfolio.append({
                 'ticker': ticker,
                 'amount': data['shares'],
-                'avg_price': avg_price,
-                'cost_basis': data['cost_basis'],
-                'realized_gain': data['realized_gain'],
-                'dividends': data['dividends'],
+                'total_buys': data['total_buys'],
+                'total_sells': data['total_sells'],
+                'total_dividends': data['total_dividends'],
+                'net_inleg': net_inleg,
                 'class': data['class'],
                 'currency': 'EUR', 
                 'symbol': '€',
@@ -522,57 +396,38 @@ elif st.session_state["authentication_status"]:
             self.ticker = ticker 
             self.original_ticker = original_ticker 
             self.yf_obj = yf.Ticker(original_ticker)
-            try:
-                self.yf_info = self.yf_obj.info
-            except:
-                self.yf_info = {}
+            try: self.yf_info = self.yf_obj.info
+            except: self.yf_info = {}
             self.finviz_data = get_finviz_data(self.ticker) if "." not in self.ticker else {}
 
         def _normalize_value(self, val, is_percent, is_dividend, is_debt_equity, source_name):
             if val is None: return None
-            if is_debt_equity:
-                if val > 5.0: return val / 100.0
-                return val
-            if is_percent:
-                if is_dividend: return val
-                else:
-                    if abs(val) <= 1.0 and val != 0: return val * 100
+            if is_debt_equity: return val / 100.0 if val > 5.0 else val
+            if is_percent: return val if is_dividend else (val * 100 if abs(val) <= 1.0 and val != 0 else val)
             return val
 
         def get_robust_peg(self):
-            values = []
-            sources = []
-            val_yf = self.yf_info.get('pegRatio')
-            if val_yf: values.append(float(val_yf)); sources.append("Yahoo")
-            val_fin = self.finviz_data.get('peg')
-            if val_fin: values.append(float(val_fin)); sources.append("Finviz")
-            if not values: return None, "N/A"
-            return sum(values) / len(values), " & ".join(sources)
+            values, sources = [], []
+            if self.yf_info.get('pegRatio'): values.append(float(self.yf_info.get('pegRatio'))); sources.append("Yahoo")
+            if self.finviz_data.get('peg'): values.append(float(self.finviz_data.get('peg'))); sources.append("Finviz")
+            return (sum(values) / len(values), " & ".join(sources)) if values else (None, "N/A")
 
         def get_combined_metric(self, key_yf, key_finviz=None, is_percent=False, is_dividend=False, is_debt_equity=False, use_average=True):
-            valid_values = []
-            sources = []
-            raw_yf = self.yf_info.get(key_yf)
-            if raw_yf is not None:
-                norm_yf = self._normalize_value(float(raw_yf), is_percent, is_dividend, is_debt_equity, "Yahoo")
-                valid_values.append(norm_yf)
+            valid_values, sources = [], []
+            if self.yf_info.get(key_yf) is not None:
+                valid_values.append(self._normalize_value(float(self.yf_info.get(key_yf)), is_percent, is_dividend, is_debt_equity, "Yahoo"))
                 sources.append("Yahoo")
             
             if not use_average and valid_values: return valid_values[0], sources[0]
 
-            if key_finviz:
-                raw_fin = self.finviz_data.get(key_finviz)
-                if raw_fin is not None:
-                    norm_fin = self._normalize_value(float(raw_fin), is_percent, is_dividend, is_debt_equity, "Finviz")
-                    valid_values.append(norm_fin)
-                    sources.append("Finviz")
+            if key_finviz and self.finviz_data.get(key_finviz) is not None:
+                valid_values.append(self._normalize_value(float(self.finviz_data.get(key_finviz)), is_percent, is_dividend, is_debt_equity, "Finviz"))
+                sources.append("Finviz")
 
             if not valid_values: return None, "N/A"
             if not use_average: return valid_values[0], sources[0]
             
-            avg_val = sum(valid_values) / len(valid_values)
-            source_str = " & ".join(sources) + (f" (Avg)" if len(sources) > 1 else "")
-            return avg_val, source_str
+            return sum(valid_values) / len(valid_values), " & ".join(sources) + (f" (Avg)" if len(sources) > 1 else "")
 
     # ==================================================
     # 5. AI SCORE
@@ -951,6 +806,7 @@ elif st.session_state["authentication_status"]:
                 live_price = ext_data.get('live_price', 0)
                 eur_rate = get_currency_rate(ext_data.get('currency_code', 'EUR'), "EUR")
                 
+                # Formule: Totale Winst = Actuele Waarde - Netto Inleg + Ontvangen Dividend
                 val_eur = live_price * amount * eur_rate
                 total_profit_eur = val_eur - net_inleg_eur + dividends_eur
                 
@@ -970,6 +826,7 @@ elif st.session_state["authentication_status"]:
                     stock_stats['profit'] += total_profit_eur
                     stock_stats['dividends'] += dividends_eur
 
+                # Rest van de stats alleen als er aandelen zijn (anders 0.0)
                 if amount > 0.01:
                     used_target = ext_data.get('target_price') if ext_data.get('target_price') else live_price
                     total_potential_eur += used_target * amount * eur_rate
@@ -1234,7 +1091,7 @@ elif st.session_state["authentication_status"]:
                     "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", disabled=False),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
-                    "Verwijder": st.column_config.CheckboxColumn("🗑", default=False)
+                    "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
                 }
                 
                 edited_df = st.data_editor(
@@ -1397,7 +1254,7 @@ elif st.session_state["authentication_status"]:
     # TAB 3: WISHLIST 
     # --------------------------------------------------
     with tabs[2]:
-        st.subheader("❤ Mijn Wishlist")
+        st.subheader("❤️️ Mijn Wishlist")
         if st.session_state['wishlist']:
             st.info("💡 Hier zie je je favoriete aandelen.")
             
@@ -1510,8 +1367,8 @@ elif st.session_state["authentication_status"]:
                                     jan_data = tk_hist[:d_jan1]
                                     dec_data = tk_hist[:d_dec31]
                                     
-                                    p_jan = float(jan_data['Close'].iloc[-1]) if not jan_data.empty else 0
-                                    p_dec = float(dec_data['Close'].iloc[-1]) if not dec_data.empty else 0
+                                    p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
+                                    p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
                                     
                                     calc_jan1 += (p_jan * p['amount'])
                                     calc_dec31 += (p_dec * p['amount'])

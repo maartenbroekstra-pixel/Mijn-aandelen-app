@@ -17,18 +17,15 @@ import streamlit_authenticator as stauth
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈")
 
-# --- AUTHENTICATIE CONFIGURATIE ---
-names = ['Eigenaar']
+names = ['Maarten Broekstra']
 usernames = ['admin']
-# Wachtwoord is 'admin'
 passwords = ['6f9a2b8c4d1e7f3a9b0c5e8d2f1a4c7b9e0d1f3a6b8c5d2e7f9a1b0c4e8d2f'] 
 
-hashed_passwords = passwords
 credentials = {
     'usernames':{
         usernames[0]:{
             'name':names[0],
-            'password':hashed_passwords[0]
+            'password':passwords[0]
             }
         }
     }
@@ -164,7 +161,6 @@ elif st.session_state["authentication_status"]:
     # ==================================================
     # 3. HELPER FUNCTIES
     # ==================================================
-
     @st.cache_data(ttl=600)
     def get_finviz_data(ticker):
         d = {}
@@ -404,7 +400,8 @@ elif st.session_state["authentication_status"]:
             "NL0000395903": "WKL.AS", "US02079K3059": "GOOGL", "US68389X1054": "ORCL",
             "US5949181045": "MSFT", "US5324571083": "LLY", "ES0119037010": "CBAV.MC",
             "KYG4124C1096": "GRAB", "US79466L3024": "CRM", "US5504241051": "LAZR", 
-            "US5504243032": "LAZR"
+            "US5504243032": "LAZR", "US6701002056": "NVO", "KYG875721634": "TCEHY", 
+            "US81762P1021": "NOW"
         }
         
         portfolio_dict = {}
@@ -859,18 +856,11 @@ elif st.session_state["authentication_status"]:
                     data_failed = True
                     failed_tickers.append(ticker)
                     ext_data = {
-                        'live_price': 0, 
-                        'target_price': 0,
-                        'previous_close': 0, 
-                        'ytd_start_price': 0,
-                        'type': 'Onbekend', 
-                        'sector': 'Fout',
-                        'country': 'Onbekend',
+                        'live_price': 0, 'target_price': 0, 'previous_close': 0, 'ytd_start_price': 0,
+                        'type': 'Onbekend', 'sector': 'Fout', 'country': 'Onbekend',
                         'currency_symbol': item.get('symbol', '?'),
-                        'shortName': f"⚠️ {ticker} (Fout)", 
-                        'longName': ticker,
-                        'earnings': None, 
-                        'dividend_history': []
+                        'shortName': f"⚠️ {ticker} (Fout)", 'longName': ticker,
+                        'earnings': None, 'dividend_history': []
                     }
 
                 live_price = ext_data.get('live_price', 0)
@@ -1386,109 +1376,90 @@ elif st.session_state["authentication_status"]:
     # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
-        st.header("🇳🇱 Box 3 Belasting Checker")
-        st.info("Vul handmatig in of laat het script een schatting maken op basis van je portfolio.")
-
-        c_inp1, c_inp2 = st.columns(2)
+        st.header("⚖️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
+        st.markdown("""
+        Volgens de uitspraak van de **Hoge Raad (juni 2024)** is de vermogensbelasting in strijd met Europees recht als je werkelijke rendement lager is dan het forfaitaire (fictieve) rendement. Je betaalt daarom **de laagste van de twee**.
+        """)
         
-        with c_inp1:
-            tax_year = st.number_input("Belastingjaar", min_value=2020, max_value=2030, value=datetime.now().year - 1)
-            savings_amount = st.number_input("Spaargeld op 1 januari (€)", value=10000.0, step=1000.0)
-            savings_yield_pct = st.number_input("Rendement op spaargeld (%)", value=1.03, step=0.01)
+        tax_year = st.selectbox("Fiscaal Jaar", [2025, 2026], index=1)
+        
+        # Tarieven 2025/2026
+        heffingsvrij = 57684.0 
+        tarief_box3 = 0.36
+        
+        forfait_sparen = 0.0137 if tax_year == 2025 else 0.0128
+        forfait_beleggen = 0.0588 if tax_year == 2025 else 0.0600
 
-        with c_inp2:
-            st.markdown(f"**Portfolio Waarde (Aandelen)**")
+        col_pf, col_man = st.columns(2)
+        with col_pf:
+            st.subheader("1. Jouw Gegevens")
+            savings_amount = st.number_input("Totaal Spaargeld (€)", value=25000.0, step=1000.0)
+            savings_rente_werkelijk = st.number_input("Ontvangen Rente in jaar (€)", value=350.0, step=10.0)
             
-            if st.button("🔄 Bereken op basis van portfolio"):
+            if st.button("🔄 Ophalen Waarde 1 Jan & 31 Dec via Yahoo (Duurt even)"):
                 calc_jan1 = 0.0
                 calc_dec31 = 0.0
-                d_jan1 = date(tax_year, 1, 1)
-                d_dec31 = date(tax_year, 12, 31)
+                d_jan1 = f"{tax_year}-01-01"
+                d_dec31 = f"{tax_year}-12-31"
                 
-                tickers_list = [p['ticker'] for p in st.session_state['portfolio']]
-                
-                if tickers_list:
-                    with st.spinner("Koersen ophalen (Bulk)..."):
-                        start_dl = date(tax_year - 1, 12, 15)
-                        end_dl = date(tax_year + 1, 1, 15)
-                        
+                with st.spinner("Historische koersen robuust ophalen..."):
+                    for p in st.session_state['portfolio']:
                         try:
-                            bulk_data = yf.download(tickers_list, start=start_dl, end=end_dl, group_by='ticker', progress=False)
-                            
-                            for p in st.session_state['portfolio']:
-                                ticker = p['ticker']
-                                amount = p['amount']
-                                buy_date = p.get('buy_date')
-                                currency = p.get('currency', 'EUR')
-                                rate = get_currency_rate(currency, "EUR")
-
-                                def get_price_from_bulk(t, d):
-                                    try:
-                                        if len(tickers_list) == 1:
-                                            df_t = bulk_data
-                                        else:
-                                            df_t = bulk_data[t]
-                                        
-                                        valid_rows = df_t[df_t.index.date <= d]
-                                        
-                                        if not valid_rows.empty:
-                                            return float(valid_rows['Close'].iloc[-1])
-                                    except:
-                                        pass
-                                    return 0.0
-
-                                if buy_date and buy_date < d_jan1:
-                                    calc_jan1 += (get_price_from_bulk(ticker, d_jan1) * amount * rate)
+                            tk_hist = yf.Ticker(p['ticker']).history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
+                            if not tk_hist.empty:
+                                jan_data = tk_hist[:d_jan1]
+                                dec_data = tk_hist[:d_dec31]
                                 
-                                if buy_date and buy_date <= d_dec31:
-                                    calc_dec31 += (get_price_from_bulk(ticker, d_dec31) * amount * rate)
-                                    
-                        except Exception as e:
-                            st.error(f"Fout bij ophalen koersen: {e}")
-
+                                p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
+                                p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
+                                
+                                calc_jan1 += (p_jan * p['amount'])
+                                calc_dec31 += (p_dec * p['amount'])
+                        except: pass
+                        
                 st.session_state.tax_val_jan1 = calc_jan1
                 st.session_state.tax_val_dec31 = calc_dec31
-                st.success("Waardes bijgewerkt!")
-                st.rerun()
+                st.success("Waardes succesvol berekend!")
 
-            pf_val_jan1 = st.number_input(f"Waarde 1 jan {tax_year}", value=st.session_state.tax_val_jan1, step=100.0)
-            pf_val_dec31 = st.number_input(f"Waarde 31 dec {tax_year}", value=st.session_state.tax_val_dec31, step=100.0)
+            pf_val_jan1 = st.number_input(f"Waarde Beleggingen op 1 jan {tax_year} (€)", value=st.session_state.tax_val_jan1)
+            pf_val_dec31 = st.number_input(f"Waarde Beleggingen op 31 dec {tax_year} (€)", value=st.session_state.tax_val_dec31)
+            netto_stortingen = st.number_input("Netto Stortingen in jaar (€)", value=0.0, help="Inleg minus opnames in dit jaar. Dit telt NIET mee als rendement.")
+            dividenden = st.number_input("Ontvangen Dividend in jaar (€)", value=0.0)
+
+        with col_man:
+            st.subheader("2. Resultaat (Je betaalt de laagste)")
             
-            st.session_state.tax_val_jan1 = pf_val_jan1
-            st.session_state.tax_val_dec31 = pf_val_dec31
+            # METHODE 1: FORFAITAIR
+            tot_vermogen = savings_amount + pf_val_jan1
+            grondslag = max(0, tot_vermogen - heffingsvrij)
+            
+            if tot_vermogen > 0:
+                aandeel_grondslag = grondslag / tot_vermogen
+                fictief_rendement = (savings_amount * forfait_sparen) + (pf_val_jan1 * forfait_beleggen)
+                belastbaar_forfait = fictief_rendement * aandeel_grondslag
+                tax_forfait = belastbaar_forfait * tarief_box3
+            else:
+                tax_forfait = 0
+            
+            # METHODE 2: WERKELIJK RENDEMENT
+            koerswinst = pf_val_dec31 - pf_val_jan1 - netto_stortingen
+            werkelijk_rendement = koerswinst + dividenden + savings_rente_werkelijk
+            
+            tax_werkelijk = max(0, werkelijk_rendement * tarief_box3)
 
-            heffingsvrij = st.number_input("Heffingsvrij vermogen (€)", value=57000.0)
-            belasting_tarief = st.number_input("Belastingtarief Box 3 (%)", value=36.0, step=0.1)
-            rendement_pct_input = st.number_input("Rendement voor Belasting (% - Forfaitair of Werkelijk)", value=6.04, step=0.01)
+            with st.container(border=True):
+                st.markdown("### 🏛️ Methode 1: Oude Forfait")
+                st.write(f"Grondslag (boven {heffingsvrij}): **€ {grondslag:,.2f}**")
+                st.write(f"Fictief rendement: **€ {fictief_rendement:,.2f}**")
+                st.markdown(f"#### Belasting: € {tax_forfait:,.2f}")
 
-        st.divider()
-        
-        stock_gain = pf_val_dec31 - pf_val_jan1
-        stock_return_pct = (stock_gain / pf_val_jan1 * 100) if pf_val_jan1 > 0 else 0.0
-        
-        savings_gain = savings_amount * (savings_yield_pct / 100)
-        
-        total_assets_start = savings_amount + pf_val_jan1
-        total_gain = stock_gain + savings_gain
-        total_return_pct = (total_gain / total_assets_start * 100) if total_assets_start > 0 else 0.0
+            with st.container(border=True):
+                st.markdown("### 📈 Methode 2: Werkelijk Rendement")
+                st.write(f"Koerswinst + Dividend + Rente: **€ {werkelijk_rendement:,.2f}**")
+                st.write("*Let op: Over werkelijk rendement is geen heffingsvrij vermogen aftrekbaar.*")
+                st.markdown(f"#### Belasting: € {tax_werkelijk:,.2f}")
 
-        grondslag = max(0, total_assets_start - heffingsvrij)
-        belastbaar_rendement = grondslag * (rendement_pct_input / 100)
-        te_betalen = belastbaar_rendement * (belasting_tarief / 100)
-        
-        st.subheader("📊 Belastingberekening")
-        
-        col_res1, col_res2, col_res3 = st.columns(3)
-        col_res1.metric("Totaal Vermogen 1 jan", f"€ {total_assets_start:,.2f}")
-        col_res2.metric("Werkelijk Behaald Rendement", f"€ {total_gain:,.2f}", f"{total_return_pct:.2f}%", help="Dit is wat je daadwerkelijk hebt verdiend (koerswinst + spaarrente).")
-        
-        col_res3.metric("Belastbaar Bedrag", f"€ {belastbaar_rendement:,.2f}", help=f"Berekend als: (Vermogen - Heffingsvrij) * {rendement_pct_input}%")
-        
-        st.divider()
-        final_c1, final_c2 = st.columns(2)
-        final_c1.info(f"**Werkelijk resultaat:**\nRendement Spaargeld: € {savings_gain:.2f}\nRendement Beleggingen: € {stock_gain:.2f}")
-        
-        final_c2.markdown(f"""
-        ### 💶 Te Betalen: € {te_betalen:,.2f}
-        *Berekend als: Belastbaar Bedrag (€ {belastbaar_rendement:,.2f}) × {belasting_tarief}%*
-        """)
+            winner = "Methode 1 (Forfaitair)" if tax_forfait < tax_werkelijk else "Methode 2 (Werkelijk Rendement)"
+            besparing = abs(tax_forfait - tax_werkelijk)
+            
+            st.success(f"**Conclusie:** Kies voor **{winner}**. Dit bespaart je € {besparing:,.2f} aan belasting.")

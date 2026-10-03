@@ -262,6 +262,39 @@ elif st.session_state["authentication_status"]:
             if data: return data
             
         return []
+    
+    @st.cache_data(ttl=86400)
+    def get_div_cagr(ticker):
+        """Berekent de Dividend CAGR over de laatste 3 tot 5 jaar"""
+        try:
+            tk = yf.Ticker(ticker)
+            divs = tk.dividends
+            if divs.empty: return 0.0
+            if divs.index.tz is not None: divs.index = divs.index.tz_localize(None)
+            
+            yearly = divs.resample('YE').sum()
+            yearly = yearly[yearly > 0]
+            if len(yearly) >= 4:
+                first = yearly.iloc[-4]
+                last = yearly.iloc[-1]
+                cagr = ((last / first) ** (1/3)) - 1
+                return float(cagr * 100)
+        except: pass
+        return 0.0
+
+    @st.cache_data(ttl=86400)
+    def get_correlation_matrix(tickers):
+        """Berekent de correlatie tussen een lijst van tickers over het afgelopen jaar"""
+        df = pd.DataFrame()
+        for t in tickers:
+            try:
+                hist = yf.Ticker(t).history(period="1y")
+                if not hist.empty:
+                    df[t] = hist['Close']
+            except: pass
+        if not df.empty and len(df.columns) > 1:
+            return df.pct_change().corr()
+        return None
 
     @st.cache_data(ttl=3600)
     def get_extended_portfolio_data(ticker):
@@ -596,6 +629,18 @@ elif st.session_state["authentication_status"]:
 
     st.sidebar.divider()
 
+    # --- CSV / EXCEL EXPORT (NIEUW) ---
+    if st.session_state.get('portfolio'):
+        df_export = pd.DataFrame(st.session_state['portfolio'])
+        csv_data = df_export.to_csv(index=False).encode('utf-8')
+        st.sidebar.download_button(
+            label="⬇️ Exporteer Portfolio (CSV)",
+            data=csv_data,
+            file_name="portfolio_export.csv",
+            mime="text/csv",
+            help="Download je verrijkte portfoliodata voor gebruik in Excel of data-analyse tools."
+        )
+
     json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[])}, default=str)
     st.sidebar.download_button(
         label="⬇️ Download Backup (JSON)",
@@ -923,6 +968,9 @@ elif st.session_state["authentication_status"]:
                 
                 total_div_eur += yearly_div_eur
                 
+                # --- NIEUW: DIVIDEND CAGR BEREKENEN ---
+                div_cagr = get_div_cagr(ticker)
+
                 sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
                 country_distribution[country] = country_distribution.get(country, 0) + val_eur
 
@@ -969,8 +1017,10 @@ elif st.session_state["authentication_status"]:
                     "GAK (€)": float(gak_eur),
                     "Prijs": display_price,
                     "Waarde (€)": val_eur,
+                    "Inleg (€)": cost_eur, # Voor DCA visualisatie
                     "Winst (€)": profit_eur,
                     "Div/Jaar (€)": yearly_div_eur,
+                    "Div CAGR (%)": div_cagr, # Nieuwe CAGR metric
                     "Datum": buy_date,
                     "Earnings": earnings_str,
                     "_earnings_color": earnings_color,
@@ -1010,8 +1060,10 @@ elif st.session_state["authentication_status"]:
                 
                 st.divider()
                 
-                st.markdown("### 📊 Rendement: ETF's vs Aandelen")
-                col_etf, col_stock = st.columns(2)
+                st.markdown("### 📊 Rendement Benchmark: ETF's vs Losse Aandelen")
+                st.caption("Vergelijk direct of je losse aandelenselectie het beter doet dan je stabiele DCA in ETF's.")
+                
+                col_etf, col_stock, col_chart_vs = st.columns([1, 1, 2])
                 
                 etf_pct = (etf_stats['profit'] / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
                 stock_pct = (stock_stats['profit'] / stock_stats['cost'] * 100) if stock_stats['cost'] > 0 else 0
@@ -1020,12 +1072,25 @@ elif st.session_state["authentication_status"]:
                     st.metric("ETF Rendement (Absoluut)", f"€ {etf_stats['profit']:,.2f}", f"{etf_pct:.1f}%")
                 with col_stock:
                     st.metric("Aandelen Rendement (Absoluut)", f"€ {stock_stats['profit']:,.2f}", f"{stock_pct:.1f}%")
-                    
+                
+                with col_chart_vs:
+                    # --- NIEUW: VISUELE BENCHMARK ETF VS AANDELEN ---
+                    df_vs = pd.DataFrame({
+                        "Categorie": ["ETF", "ETF", "Losse Aandelen", "Losse Aandelen"],
+                        "Waarde Type": ["Geïnvesteerd Kapitaal", "Huidige Actuele Waarde", "Geïnvesteerd Kapitaal", "Huidige Actuele Waarde"],
+                        "Bedrag (€)": [etf_stats['cost'], etf_stats['value'], stock_stats['cost'], stock_stats['value']]
+                    })
+                    fig_vs = px.bar(df_vs, x="Categorie", y="Bedrag (€)", color="Waarde Type", barmode="group", 
+                                    color_discrete_sequence=[MATTE_COLORS["charcoal"], MATTE_COLORS["blue"]],
+                                    title="Inleg vs. Huidige Waarde")
+                    fig_vs.update_layout(height=250, margin=dict(t=30, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig_vs, use_container_width=True)
+
                 st.divider()
 
                 comp1, comp2, comp3 = st.columns(3)
                 with comp1:
-                    st.markdown("**Verdeling: Aandelen vs ETF's**")
+                    st.markdown("**Verdeling Kapitaal: Aandelen vs ETF's**")
                     fig_d1 = go.Figure(data=[go.Pie(
                         labels=['ETF', 'Aandelen'], 
                         values=[etf_stats['value'], stock_stats['value']], 
@@ -1035,12 +1100,8 @@ elif st.session_state["authentication_status"]:
                     )])
                     fig_d1.update_traces(marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                     fig_d1.update_layout(
-                        showlegend=True,
-                        legend=dict(orientation="h", y=-0.1), 
-                        height=200, 
-                        margin=dict(t=0, b=0, l=0, r=0),
-                        plot_bgcolor='rgba(0,0,0,0)', 
-                        paper_bgcolor='rgba(0,0,0,0)'
+                        showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
+                        margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
                     )
                     st.plotly_chart(fig_d1, use_container_width=True)
 
@@ -1050,18 +1111,12 @@ elif st.session_state["authentication_status"]:
                         fig_d2 = go.Figure(data=[go.Pie(
                             labels=list(sector_distribution.keys()), 
                             values=list(sector_distribution.values()), 
-                            hole=.6,
-                            textposition='inside',
-                            textinfo='percent'
+                            hole=.6, textposition='inside', textinfo='percent'
                         )])
                         fig_d2.update_traces(marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
                         fig_d2.update_layout(
-                            showlegend=True,
-                            legend=dict(orientation="h", y=-0.1),
-                            height=200, 
-                            margin=dict(t=0, b=0, l=0, r=0),
-                            plot_bgcolor='rgba(0,0,0,0)', 
-                            paper_bgcolor='rgba(0,0,0,0)'
+                            showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_d2, use_container_width=True)
                 
@@ -1071,19 +1126,47 @@ elif st.session_state["authentication_status"]:
                         fig_d3 = go.Figure(data=[go.Pie(
                             labels=list(country_distribution.keys()), 
                             values=list(country_distribution.values()), 
-                            hole=.6,
-                            textposition='inside',
-                            textinfo='percent'
+                            hole=.6, textposition='inside', textinfo='percent'
                         )])
                         fig_d3.update_layout(
-                            showlegend=True,
-                            legend=dict(orientation="h", y=-0.1),
-                            height=200, 
-                            margin=dict(t=0, b=0, l=0, r=0),
-                            plot_bgcolor='rgba(0,0,0,0)', 
-                            paper_bgcolor='rgba(0,0,0,0)'
+                            showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_d3, use_container_width=True)
+
+            # --- NIEUW: DCA INLEG TIJDLIJN ---
+            with st.expander("📅 Inleg Tijdlijn (DCA) & Verdeling", expanded=False):
+                st.markdown("Dit is de visuele weergave van de maand waarin je je huidige posities hebt aangekocht. Perfect om de continuïteit van je DCA-strategie te controleren.")
+                df_dca_base = pd.DataFrame(portfolio_data)
+                if not df_dca_base.empty and 'Datum' in df_dca_base.columns:
+                    df_dca_base['Maand'] = pd.to_datetime(df_dca_base['Datum']).dt.to_period('M').astype(str)
+                    df_dca_grouped = df_dca_base.groupby(['Maand', 'Type'])['Inleg (€)'].sum().reset_index()
+                    df_dca_grouped = df_dca_grouped.sort_values(by='Maand')
+                    
+                    fig_dca = px.bar(df_dca_grouped, x='Maand', y='Inleg (€)', color='Type', 
+                                     title='Totaal Geïnvesteerd Kapitaal per Aankoopmaand',
+                                     color_discrete_sequence=[MATTE_COLORS["blue"], MATTE_COLORS["red"]])
+                    fig_dca.update_layout(height=350, xaxis_title="Maand van Aankoop", yaxis_title="Geïnvesteerd (€)",
+                                          plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig_dca, use_container_width=True)
+                else:
+                    st.info("Geen aankoopdatums gevonden om de DCA-tijdlijn op te bouwen.")
+
+            # --- NIEUW: CORRELATIE MATRIX ---
+            with st.expander("🔗 Risico & Correlatie Matrix", expanded=False):
+                st.markdown("Vergelijk hoe de koersen van je top-10 posities in het afgelopen jaar op elkaar reageerden. **1.0 = Perfecte meebeweging, -1.0 = Tegengestelde beweging.**")
+                if len(portfolio_data) > 1:
+                    top_10_tickers = [p['Ticker'] for p in portfolio_data[:10]]
+                    with st.spinner("Correlaties berekenen... (Duurt de eerste keer een paar seconden)"):
+                        corr_matrix = get_correlation_matrix(top_10_tickers)
+                        if corr_matrix is not None:
+                            fig_corr = px.imshow(corr_matrix, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
+                            fig_corr.update_layout(height=500, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+                            st.plotly_chart(fig_corr, use_container_width=True)
+                        else:
+                            st.warning("Kon onvoldoende data ophalen voor een correlatiematrix.")
+                else:
+                    st.info("Je hebt minimaal 2 posities nodig om correlaties te berekenen.")
 
             with st.expander("💰 Dividend Dashboard", expanded=False):
                 col_div1, col_div2 = st.columns(2)
@@ -1105,13 +1188,16 @@ elif st.session_state["authentication_status"]:
                     else:
                         st.info("Geen gedetailleerde uitbetalingsdata beschikbaar.")
                 with col_div2:
-                    st.markdown("**Dividend per Positie**")
+                    st.markdown("**Dividend per Positie & Groei**")
                     df_charts = pd.DataFrame(portfolio_data)
                     if not df_charts.empty:
                         df_charts = df_charts.sort_values(by="Div/Jaar (€)", ascending=False)
-                        fig_bar = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', color_discrete_map=SECTOR_COLORS)
-                        fig_bar.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
-                        st.plotly_chart(fig_bar, use_container_width=True)
+                        # Voeg CAGR toe aan hover data
+                        fig_bar2 = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', 
+                                          hover_data={'Div CAGR (%)': ':.2f'},
+                                          color_discrete_map=SECTOR_COLORS)
+                        fig_bar2.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
+                        st.plotly_chart(fig_bar2, use_container_width=True)
 
             with st.expander("📋 Aandelen & Details", expanded=True):
                 st.info("💡 Bewerk 'GAK (€)', 'Aantal' of 'Datum' in de tabel. Selecteer een aandeel daaronder voor details.")
@@ -1128,6 +1214,7 @@ elif st.session_state["authentication_status"]:
                     "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
                     "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
                     "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
+                    "Div CAGR (%)": st.column_config.NumberColumn("Div Groei (3j %)", format="%.1f%%", disabled=True), # NIEUW
                     "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", min_value=date(1980, 1, 1), max_value=date(2050, 12, 31)),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
@@ -1137,7 +1224,7 @@ elif st.session_state["authentication_status"]:
                 edited_df = st.data_editor(
                     df_editor_source, 
                     column_config=column_settings, 
-                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Datum", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Earnings"), 
+                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Datum", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Div CAGR (%)", "Earnings"), 
                     hide_index=True, 
                     use_container_width=True, 
                     key="main_portfolio_editor"

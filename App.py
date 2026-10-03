@@ -1254,7 +1254,7 @@ elif st.session_state["authentication_status"]:
     # TAB 3: WISHLIST 
     # --------------------------------------------------
     with tabs[2]:
-        st.subheader("❤️️ Mijn Wishlist")
+        st.subheader("❤ Mijn Wishlist")
         if st.session_state['wishlist']:
             st.info("💡 Hier zie je je favoriete aandelen.")
             
@@ -1333,88 +1333,160 @@ elif st.session_state["authentication_status"]:
     # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
-        st.header("⚖️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
+        st.header("⚖️ Box 3 Belasting Calculator (2025 - 2028)")
         st.markdown("""
-        Volgens de uitspraak van de **Hoge Raad (juni 2024)** is de vermogensbelasting in strijd met Europees recht als je werkelijke rendement lager is dan het forfaitaire (fictieve) rendement. Je betaalt daarom **de laagste van de twee**.
+        Volgens de uitspraak van de **Hoge Raad** betaal je in 2025/2026/2027 de laagste van de twee stelsels (forfaitair vs werkelijk).
+        Vanaf **2028** stapt het kabinet over op **vermogenswinstbelasting** (met een heffingsvrij resultaat van € 1.000).
         """)
         
-        tax_year = st.selectbox("Fiscaal Jaar", [2025, 2026], index=1)
+        tax_year = st.selectbox("Fiscaal Jaar", [2025, 2026, 2027, 2028], index=1)
         
-        heffingsvrij = 57684.0 
-        tarief_box3 = 0.36
+        # Standaardwaarden op basis van meest actuele Prinsjesdag / Voorjaarsnota gegevens
+        def_heffingsvrij = 57684.0
+        def_forfait_sparen = 0.0128
+        def_forfait_beleggen = 0.0600
+        def_tarief = 0.36
+        def_heffingsvrij_resultaat = 0.0
         
-        forfait_sparen = 0.0137 if tax_year == 2025 else 0.0128
-        forfait_beleggen = 0.0588 if tax_year == 2025 else 0.0600
+        if tax_year == 2025:
+            def_heffingsvrij = 57684.0 
+            def_forfait_sparen = 0.0137
+            def_forfait_beleggen = 0.0588
+        elif tax_year == 2026:
+            def_heffingsvrij = 59357.0 
+            def_forfait_sparen = 0.0128
+            def_forfait_beleggen = 0.0600
+        elif tax_year == 2027:
+            def_heffingsvrij = 30846.0  # Gehalveerd volgens laatste plannen (okt 2026)
+            def_forfait_sparen = 0.0128
+            def_forfait_beleggen = 0.0750 # 1,5% verhoging forfait volgens Prinsjesdag '26
+        elif tax_year == 2028:
+            def_heffingsvrij = 0.0 # Vervalt in principe, wordt vervangen door heffingsvrij resultaat
+            def_heffingsvrij_resultaat = 1000.0 # Nieuwe heffingsvrij resultaat
+            def_tarief = 0.36
+            
+        with st.expander("⚙️ Geavanceerde Instellingen (Handmatig Aanpassen)", expanded=False):
+            c1, c2 = st.columns(2)
+            heffingsvrij = c1.number_input("Heffingsvrij Vermogen (€)", value=def_heffingsvrij, step=1000.0)
+            tarief_box3 = c1.number_input("Belastingtarief Box 3 (%)", value=def_tarief * 100, step=1.0) / 100
+            
+            if tax_year < 2028:
+                forfait_sparen = c2.number_input("Forfait Sparen (%)", value=def_forfait_sparen * 100, step=0.1) / 100
+                forfait_beleggen = c2.number_input("Forfait Beleggen (%)", value=def_forfait_beleggen * 100, step=0.1) / 100
+            else:
+                heffingsvrij_resultaat = c2.number_input("Heffingsvrij Resultaat (€)", value=def_heffingsvrij_resultaat, step=100.0)
 
         col_pf, col_man = st.columns(2)
         with col_pf:
             st.subheader("1. Jouw Gegevens")
-            savings_amount = st.number_input("Totaal Spaargeld (€)", value=25000.0, step=1000.0)
-            savings_rente_werkelijk = st.number_input("Ontvangen Rente in jaar (€)", value=350.0, step=10.0)
             
-            if st.button("🔄 Ophalen Waarde 1 Jan & 31 Dec via Yahoo (Duurt even)"):
-                calc_jan1 = 0.0
-                calc_dec31 = 0.0
-                d_jan1 = f"{tax_year}-01-01"
-                d_dec31 = f"{tax_year}-12-31"
+            if tax_year < 2028:
+                savings_amount = st.number_input("Totaal Spaargeld (€)", value=25000.0, step=1000.0)
+                savings_rente_werkelijk = st.number_input("Ontvangen Rente in jaar (€)", value=350.0, step=10.0)
                 
-                with st.spinner("Historische koersen robuust ophalen..."):
-                    for p in st.session_state['portfolio']:
-                        if p.get('amount', 0) > 0.01:
-                            try:
-                                tk_hist = yf.Ticker(p['ticker']).history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
-                                if not tk_hist.empty:
-                                    jan_data = tk_hist[:d_jan1]
-                                    dec_data = tk_hist[:d_dec31]
+                if st.button("🔄 Ophalen Waarde 1 Jan & 31 Dec via Yahoo (Duurt even)"):
+                    calc_jan1 = 0.0
+                    calc_dec31 = 0.0
+                    d_jan1 = f"{tax_year}-01-01"
+                    d_dec31 = f"{tax_year}-12-31"
+                    
+                    with st.spinner("Historische koersen robuust ophalen (inclusief valuta-omrekening)..."):
+                        for p in st.session_state['portfolio']:
+                            if p.get('amount', 0) > 0.01:
+                                try:
+                                    tk = yf.Ticker(p['ticker'])
+                                    currency = tk.info.get('currency', 'EUR')
+                                    rate = get_currency_rate(currency, 'EUR')
                                     
-                                    p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
-                                    p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
-                                    
-                                    calc_jan1 += (p_jan * p['amount'])
-                                    calc_dec31 += (p_dec * p['amount'])
-                            except: pass
-                        
-                st.session_state.tax_val_jan1 = calc_jan1
-                st.session_state.tax_val_dec31 = calc_dec31
-                st.success("Waardes succesvol berekend!")
+                                    tk_hist = tk.history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
+                                    if not tk_hist.empty:
+                                        if tk_hist.index.tz is not None:
+                                            tk_hist.index = tk_hist.index.tz_localize(None)
+                                            
+                                        jan_data = tk_hist[tk_hist.index <= pd.to_datetime(d_jan1)]
+                                        dec_data = tk_hist[tk_hist.index <= pd.to_datetime(d_dec31)]
+                                        
+                                        p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
+                                        p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else p_jan
+                                        
+                                        calc_jan1 += (p_jan * p['amount'] * rate)
+                                        calc_dec31 += (p_dec * p['amount'] * rate)
+                                except Exception as e: 
+                                    st.warning(f"Kon {p['ticker']} niet ophalen: {e}")
+                                    pass
+                            
+                    st.session_state.tax_val_jan1 = calc_jan1
+                    st.session_state.tax_val_dec31 = calc_dec31
+                    st.success("Waardes succesvol berekend en omgerekend naar EUR!")
 
-            pf_val_jan1 = st.number_input(f"Waarde Beleggingen op 1 jan {tax_year} (€)", value=st.session_state.tax_val_jan1)
-            pf_val_dec31 = st.number_input(f"Waarde Beleggingen op 31 dec {tax_year} (€)", value=st.session_state.tax_val_dec31)
-            netto_stortingen = st.number_input("Netto Stortingen in jaar (€)", value=0.0, help="Inleg minus opnames in dit jaar. Dit telt NIET mee als rendement.")
-            dividenden = st.number_input("Ontvangen Dividend in jaar (€)", value=0.0)
+                pf_val_jan1 = st.number_input(f"Waarde Beleggingen op 1 jan {tax_year} (€)", value=float(st.session_state.get('tax_val_jan1', 0.0)))
+                pf_val_dec31 = st.number_input(f"Waarde Beleggingen op 31 dec {tax_year} (€)", value=float(st.session_state.get('tax_val_dec31', 0.0)))
+                netto_stortingen = st.number_input("Netto Stortingen in jaar (€)", value=0.0, help="Inleg minus opnames in dit jaar. Dit telt NIET mee als rendement.")
+                dividenden = st.number_input("Ontvangen Dividend in jaar (€)", value=0.0)
+                
+            else:
+                st.info("Voor 2028 (Vermogenswinstbelasting) telt de gerealiseerde winst (verkoop), dividend en rente minus het heffingsvrije resultaat.")
+                savings_rente_werkelijk = st.number_input("Ontvangen Rente in jaar (€)", value=350.0, step=10.0)
+                dividenden = st.number_input("Ontvangen Dividend in jaar (€)", value=1000.0)
+                gerealiseerde_winst = st.number_input("Gerealiseerde Koerswinst bij verkoop (€)", value=5000.0, help="De winst op aandelen/ETF's die je daadwerkelijk verkocht hebt in 2028.")
 
         with col_man:
-            st.subheader("2. Resultaat (Je betaalt de laagste)")
+            st.subheader("2. Resultaat")
             
-            tot_vermogen = savings_amount + pf_val_jan1
-            grondslag = max(0, tot_vermogen - heffingsvrij)
-            
-            if tot_vermogen > 0:
-                aandeel_grondslag = grondslag / tot_vermogen
-                fictief_rendement = (savings_amount * forfait_sparen) + (pf_val_jan1 * forfait_beleggen)
-                belastbaar_forfait = fictief_rendement * aandeel_grondslag
-                tax_forfait = belastbaar_forfait * tarief_box3
+            if tax_year < 2028:
+                tot_vermogen = savings_amount + pf_val_jan1
+                grondslag = max(0, tot_vermogen - heffingsvrij)
+                
+                if tot_vermogen > 0:
+                    aandeel_grondslag = grondslag / tot_vermogen
+                    fictief_rendement = (savings_amount * forfait_sparen) + (pf_val_jan1 * forfait_beleggen)
+                    belastbaar_forfait = fictief_rendement * aandeel_grondslag
+                    tax_forfait = belastbaar_forfait * tarief_box3
+                else:
+                    tax_forfait = 0
+                
+                koerswinst = pf_val_dec31 - pf_val_jan1 - netto_stortingen
+                werkelijk_rendement = koerswinst + dividenden + savings_rente_werkelijk
+                
+                tax_werkelijk = max(0, werkelijk_rendement * tarief_box3)
+
+                with st.container(border=True):
+                    st.markdown("### 🏛️ Methode 1: Forfaitair Stelsel")
+                    st.write(f"Grondslag (boven heffingsvrij): **€ {grondslag:,.2f}**")
+                    st.write(f"Fictief rendement: **€ {fictief_rendement:,.2f}**")
+                    st.markdown(f"#### Belasting: € {tax_forfait:,.2f}")
+
+                with st.container(border=True):
+                    st.markdown("### 📈 Methode 2: Werkelijk Rendement")
+                    st.write(f"Koerswinst + Dividend + Rente: **€ {werkelijk_rendement:,.2f}**")
+                    st.write("*Let op: Bij werkelijk rendement mag heffingsvrij vermogen niet afgetrokken worden, tenzij je totale vermogen onder de grens is (dan betaal je niets in methode 1 en ben je klaar).*")
+                    
+                    if grondslag <= 0:
+                        tax_werkelijk = 0.0
+                        st.success("Totaal vermogen is onder de vrijstelling. Belasting is 0 in methode 1, dus hier ook 0.")
+                    
+                    st.markdown(f"#### Belasting: € {tax_werkelijk:,.2f}")
+
+                winner = "Methode 1 (Forfaitair)" if tax_forfait <= tax_werkelijk else "Methode 2 (Werkelijk Rendement)"
+                besparing = abs(tax_forfait - tax_werkelijk)
+                
+                final_tax = min(tax_forfait, tax_werkelijk)
+                if grondslag <= 0:
+                    st.success("Je betaalt **geen vermogensbelasting** omdat je onder het heffingsvrije vermogen zit.")
+                else:
+                    st.success(f"**Conclusie:** De wet gaat uit van het voordeligste stelsel. Je kiest voor **{winner}**. Je bespaart hiermee € {besparing:,.2f} ten opzichte van de dure methode.")
+                    st.info(f"👉 **Definitieve belastingdruk Box 3:** € {final_tax:,.2f}")
             else:
-                tax_forfait = 0
-            
-            koerswinst = pf_val_dec31 - pf_val_jan1 - netto_stortingen
-            werkelijk_rendement = koerswinst + dividenden + savings_rente_werkelijk
-            
-            tax_werkelijk = max(0, werkelijk_rendement * tarief_box3)
-
-            with st.container(border=True):
-                st.markdown("### 🏛️ Methode 1: Oude Forfait")
-                st.write(f"Grondslag (boven {heffingsvrij}): **€ {grondslag:,.2f}**")
-                st.write(f"Fictief rendement: **€ {fictief_rendement:,.2f}**")
-                st.markdown(f"#### Belasting: € {tax_forfait:,.2f}")
-
-            with st.container(border=True):
-                st.markdown("### 📈 Methode 2: Werkelijk Rendement")
-                st.write(f"Koerswinst + Dividend + Rente: **€ {werkelijk_rendement:,.2f}**")
-                st.write("*Let op: Over werkelijk rendement is geen heffingsvrij vermogen aftrekbaar.*")
-                st.markdown(f"#### Belasting: € {tax_werkelijk:,.2f}")
-
-            winner = "Methode 1 (Forfaitair)" if tax_forfait < tax_werkelijk else "Methode 2 (Werkelijk Rendement)"
-            besparing = abs(tax_forfait - tax_werkelijk)
-            
-            st.success(f"**Conclusie:** Kies voor **{winner}**. Dit bespaart je € {besparing:,.2f} aan belasting.")
+                werkelijk_rendement = gerealiseerde_winst + dividenden + savings_rente_werkelijk
+                belastbare_winst = max(0, werkelijk_rendement - heffingsvrij_resultaat)
+                tax_2028 = belastbare_winst * tarief_box3
+                
+                with st.container(border=True):
+                    st.markdown("### 🏛️ Nieuw Stelsel: Vermogenswinstbelasting")
+                    st.write(f"Gerealiseerde winst (verkoop): **€ {gerealiseerde_winst:,.2f}**")
+                    st.write(f"Ontvangen dividend en rente: **€ {(dividenden + savings_rente_werkelijk):,.2f}**")
+                    st.write(f"Totaal werkelijk resultaat: **€ {werkelijk_rendement:,.2f}**")
+                    st.write(f"Minus heffingsvrij resultaat: **- € {heffingsvrij_resultaat:,.2f}**")
+                    st.divider()
+                    st.write(f"Belastbare winst: **€ {belastbare_winst:,.2f}**")
+                    st.markdown(f"#### Belasting (tarief {tarief_box3*100:.0f}%): € {tax_2028:,.2f}")

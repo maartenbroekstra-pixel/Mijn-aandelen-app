@@ -268,7 +268,6 @@ elif st.session_state["authentication_status"]:
     
     @st.cache_data(ttl=86400)
     def get_div_cagr(ticker):
-        """Berekent de Dividend CAGR over de laatste 3 tot 5 jaar"""
         try:
             tk = yf.Ticker(ticker)
             divs = tk.dividends
@@ -287,7 +286,6 @@ elif st.session_state["authentication_status"]:
 
     @st.cache_data(ttl=86400)
     def get_correlation_matrix(tickers):
-        """Berekent de correlatie tussen een lijst van tickers over het afgelopen jaar"""
         df = pd.DataFrame()
         for t in tickers:
             try:
@@ -443,9 +441,9 @@ elif st.session_state["authentication_status"]:
         portfolio_dict = {}
         dca_history = {}
         
-        df_trades = df[df['type'].isin(['BUY', 'SELL', 'MIGRATION', 'REVERSE_SPLIT', 'SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])]
+        df_trades = df[df['type'].isin(['BUY', 'SELL', 'DIVIDEND', 'MIGRATION', 'SPLIT', 'REVERSE_SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])].copy()
         
-        for _, row in df_trades.iterrows():
+        for _, row in df_trades.sort_values('date').iterrows():
             isin = row['symbol']
             t_type = row['type']
             a_class = row['asset_class']
@@ -462,19 +460,20 @@ elif st.session_state["authentication_status"]:
             try: date_val = datetime.strptime(str(row['date']).split('T')[0], "%Y-%m-%d").date()
             except: date_val = datetime.now().date()
             
+            if pd.isna(isin) or str(isin).strip() == '':
+                continue
+            
             if isin not in portfolio_dict:
-                portfolio_dict[isin] = {'shares': 0.0, 'total_invested': 0.0, 'date': date_val}
+                portfolio_dict[isin] = {'shares': 0.0, 'cost_basis': 0.0, 'realized_gain': 0.0, 'dividends': 0.0, 'class': 'FUND' if a_class == 'FUND' else 'Aandeel', 'buy_date': date_val}
             
             month_str = date_val.strftime('%Y-%m')
             cat = 'ETF' if a_class == 'FUND' else 'Aandeel'
             
             if t_type == 'BUY':
                 portfolio_dict[isin]['shares'] += shares_raw
-                # amount_val is often negative for buys, so we take abs(). Fallback to shares*price
                 invested = abs(amount_val) if amount_val != 0 else (shares_raw * price)
-                portfolio_dict[isin]['total_invested'] += invested
+                portfolio_dict[isin]['cost_basis'] += invested
                 
-                # Registreer voor DCA history per unieke maand
                 if month_str not in dca_history:
                     dca_history[month_str] = {'ETF': 0, 'Aandeel': 0}
                 dca_history[month_str][cat] += invested
@@ -482,34 +481,44 @@ elif st.session_state["authentication_status"]:
             elif t_type == 'SELL':
                 abs_shares = abs(shares_raw)
                 old_shares = portfolio_dict[isin]['shares']
-                portfolio_dict[isin]['shares'] -= abs_shares
+                cash_received = abs(amount_val) if amount_val != 0 else (abs_shares * price)
                 
-                if portfolio_dict[isin]['shares'] < 0:
-                    portfolio_dict[isin]['shares'] = 0.0
-                    
                 if old_shares > 0:
-                    portfolio_dict[isin]['total_invested'] -= (abs_shares * (portfolio_dict[isin]['total_invested'] / old_shares))
+                    avg_cost = portfolio_dict[isin]['cost_basis'] / old_shares
+                    cost_of_sold = avg_cost * abs_shares
+                    portfolio_dict[isin]['shares'] -= abs_shares
+                    portfolio_dict[isin]['cost_basis'] -= cost_of_sold
+                    portfolio_dict[isin]['realized_gain'] += (cash_received - cost_of_sold)
                 else:
-                    portfolio_dict[isin]['total_invested'] = 0.0
-            
+                    portfolio_dict[isin]['realized_gain'] += cash_received
+                    
+                if portfolio_dict[isin]['shares'] < 0.0001:
+                    portfolio_dict[isin]['shares'] = 0.0
+                    portfolio_dict[isin]['cost_basis'] = 0.0
+                    
+            elif t_type == 'DIVIDEND':
+                portfolio_dict[isin]['dividends'] += amount_val
+                
             elif t_type in ['MIGRATION', 'SPLIT', 'REVERSE_SPLIT']:
-                # Een migratie of split verandert alleen het aantal stuks, NIET het geïnvesteerde vermogen!
                 portfolio_dict[isin]['shares'] += shares_raw
                     
         new_portfolio = []
         for isin, data in portfolio_dict.items():
-            if data['shares'] > 0.01: 
-                ticker = isin_to_yf.get(isin, isin)
-                avg_price = data['total_invested'] / data['shares'] if data['shares'] > 0 else 0
-                
-                new_portfolio.append({
-                    'ticker': ticker,
-                    'amount': data['shares'],
-                    'avg_price': avg_price,
-                    'currency': 'EUR', 
-                    'symbol': '€',
-                    'buy_date': data['date']
-                })
+            ticker = isin_to_yf.get(isin, isin)
+            avg_price = data['cost_basis'] / data['shares'] if data['shares'] > 0 else 0
+            
+            new_portfolio.append({
+                'ticker': ticker,
+                'amount': data['shares'],
+                'avg_price': avg_price,
+                'cost_basis': data['cost_basis'],
+                'realized_gain': data['realized_gain'],
+                'dividends': data['dividends'],
+                'class': data['class'],
+                'currency': 'EUR', 
+                'symbol': '€',
+                'buy_date': data['buy_date']
+            })
         return new_portfolio, dca_history
 
     # ==================================================
@@ -643,7 +652,8 @@ elif st.session_state["authentication_status"]:
                 st.session_state['portfolio'] = parsed_portfolio
                 st.session_state['dca_history'] = parsed_dca
                 save_portfolio_to_db()
-                st.sidebar.success(f"{len(parsed_portfolio)} posities succesvol ingeladen!")
+                active_count = len([p for p in parsed_portfolio if p['amount'] > 0.01])
+                st.sidebar.success(f"Ingeladen: {active_count} actieve posities en historische data!")
                 time.sleep(1)
                 st.rerun()
             else:
@@ -653,7 +663,6 @@ elif st.session_state["authentication_status"]:
 
     st.sidebar.divider()
 
-    # --- CSV / EXCEL EXPORT (NIEUW) ---
     if st.session_state.get('portfolio'):
         df_export = pd.DataFrame(st.session_state['portfolio'])
         csv_data = df_export.to_csv(index=False).encode('utf-8')
@@ -706,7 +715,7 @@ elif st.session_state["authentication_status"]:
     # ==================================================
     # 7. HOOFDINTERFACE TABS
     # ==================================================
-    tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️️ Wishlist", "🇳🇱 Belasting"])
+    tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️ Wishlist", "🇳🇱 Belasting"])
 
     # --------------------------------------------------
     # TAB 1: ANALYSE
@@ -870,6 +879,10 @@ elif st.session_state["authentication_status"]:
                                     'ticker': selected_ticker,
                                     'amount': amount_input,
                                     'avg_price': price_native,
+                                    'cost_basis': price_native * amount_input,
+                                    'realized_gain': 0.0,
+                                    'dividends': 0.0,
+                                    'class': 'Aandeel',
                                     'currency': raw_currency,
                                     'symbol': curr_sym,
                                     'buy_date': date_input
@@ -901,162 +914,159 @@ elif st.session_state["authentication_status"]:
             
             total_val_eur = 0
             total_cost_eur = 0
-            total_div_eur = 0
+            total_unrealized_eur = 0
+            total_realized_eur = 0
+            total_received_div_eur = 0
+            
             total_day_change_eur = 0
             total_year_change_eur = 0
             total_potential_eur = 0
+            total_expected_div_eur = 0
 
-            etf_stats = {'value': 0, 'cost': 0, 'profit': 0}
-            stock_stats = {'value': 0, 'cost': 0, 'profit': 0}
+            etf_stats = {'value': 0, 'cost': 0, 'realized': 0, 'dividends': 0}
+            stock_stats = {'value': 0, 'cost': 0, 'realized': 0, 'dividends': 0}
             
             failed_tickers = []
             earnings_history_store = {}
             ticker_details_map = {} 
 
             progress_bar = st.progress(0, text="Portfolio data analyseren...")
-            
             current_year_date = date(datetime.now().year, 1, 1)
 
             for i, item in enumerate(st.session_state['portfolio']):
                 ticker = item['ticker']
                 progress_bar.progress((i + 1) / len(st.session_state['portfolio']), text=f"Analyseren: {ticker}...")
                 
-                ext_data = get_extended_portfolio_data(ticker)
+                amount = item.get('amount', 0)
+                cost_basis = item.get('cost_basis', item.get('avg_price', 0) * amount)
+                realized_gain = item.get('realized_gain', 0.0)
+                dividends = item.get('dividends', 0.0)
+                p_class = item.get('class', 'Aandeel')
+                buy_date = item.get('buy_date', None)
                 
-                data_failed = False
-                if ext_data is None:
-                    data_failed = True
-                    failed_tickers.append(ticker)
-                    ext_data = {
-                        'live_price': 0, 'target_price': 0, 'previous_close': 0, 'ytd_start_price': 0,
-                        'type': 'Onbekend', 'sector': 'Fout', 'country': 'Onbekend',
-                        'currency_symbol': item.get('symbol', '?'),
-                        'shortName': f"⚠️ {ticker} (Fout)", 'longName': ticker,
-                        'earnings': None, 'dividend_history': []
+                # Active Holdings Logica
+                if amount > 0.01:
+                    ext_data = get_extended_portfolio_data(ticker)
+                    
+                    data_failed = False
+                    if ext_data is None:
+                        data_failed = True
+                        failed_tickers.append(ticker)
+                        ext_data = {
+                            'live_price': 0, 'target_price': 0, 'previous_close': 0, 'ytd_start_price': 0,
+                            'type': 'Onbekend', 'sector': 'Fout', 'country': 'Onbekend',
+                            'currency_symbol': item.get('symbol', '?'),
+                            'shortName': f"⚠️ {ticker} (Fout)", 'longName': ticker,
+                            'earnings': None, 'dividend_history': []
+                        }
+
+                    live_price = ext_data.get('live_price', 0)
+                    if live_price is None: live_price = 0
+                    
+                    eur_rate = get_currency_rate(ext_data.get('currency_code', 'EUR'), "EUR")
+                    
+                    val_eur = live_price * amount * eur_rate
+                    cost_eur = cost_basis
+                    
+                    unrealized_profit = val_eur - cost_eur
+                    total_profit = unrealized_profit + realized_gain + dividends
+                    
+                    total_val_eur += val_eur
+                    total_cost_eur += cost_eur
+                    total_unrealized_eur += unrealized_profit
+                    total_realized_eur += realized_gain
+                    total_received_div_eur += dividends
+                    
+                    used_target = ext_data.get('target_price') if ext_data.get('target_price') else live_price
+                    total_potential_eur += used_target * amount * eur_rate
+                    
+                    if not data_failed:
+                        if ext_data.get('previous_close'):
+                            total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
+                        
+                        ytd_ref_price = ext_data.get('ytd_start_price')
+                        if buy_date and buy_date >= current_year_date:
+                            ytd_ref_price = item.get('avg_price', 0)
+                        
+                        if ytd_ref_price and ytd_ref_price > 0:
+                            total_year_change_eur += (live_price - ytd_ref_price) * amount * eur_rate
+
+                    yearly_expected_div_eur = 0
+                    if ext_data and not data_failed:
+                        if ext_data.get('dividend_history'):
+                            for div_pay in ext_data['dividend_history']:
+                                payout_eur = div_pay['amount'] * amount * eur_rate
+                                monthly_div_projection[div_pay['month']] += payout_eur
+                                yearly_expected_div_eur += payout_eur
+                        elif ext_data.get('fallback_div_rate'):
+                            yearly_expected_div_eur = ext_data['fallback_div_rate'] * amount * eur_rate
+                        elif ext_data.get('fallback_div_yield') and ext_data['fallback_div_yield'] > 0:
+                            yearly_expected_div_eur = (live_price * ext_data['fallback_div_yield']) * amount * eur_rate
+                    
+                    total_expected_div_eur += yearly_expected_div_eur
+                    
+                    div_cagr = get_div_cagr(ticker)
+                    
+                    sector_distribution[ext_data.get('sector', 'Onbekend')] = sector_distribution.get(ext_data.get('sector', 'Onbekend'), 0) + val_eur
+                    country_distribution[ext_data.get('country', 'Onbekend')] = country_distribution.get(ext_data.get('country', 'Onbekend'), 0) + val_eur
+
+                    if ext_data.get('type') == 'ETF' or p_class == 'FUND':
+                        etf_stats['cost'] += cost_eur
+                        etf_stats['value'] += val_eur
+                        etf_stats['realized'] += realized_gain
+                        etf_stats['dividends'] += dividends
+                    else:
+                        stock_stats['cost'] += cost_eur
+                        stock_stats['value'] += val_eur
+                        stock_stats['realized'] += realized_gain
+                        stock_stats['dividends'] += dividends
+
+                    earnings_str = "-"
+                    if ext_data:
+                        if ext_data.get('earnings_history'):
+                            earnings_history_store[ticker] = ext_data['earnings_history']
+                        if ext_data.get('earnings'):
+                            surp = ext_data['earnings']['surprise_pct']
+                            earnings_str = f"Beat: +{surp:.1f}%" if surp > 0 else f"Miss: {surp:.1f}%"
+                    
+                    ticker_details_map[ticker] = {
+                        'shortName': ext_data.get('shortName', ticker),
+                        'longName': ext_data.get('longName', ticker)
                     }
 
-                live_price = ext_data.get('live_price', 0)
-                target_price = ext_data.get('target_price') 
-                if live_price is None: live_price = 0
+                    portfolio_data.append({
+                        "Ticker": ticker,
+                        "Naam": ext_data.get('shortName', ticker),
+                        "Type": ext_data.get('type', p_class),
+                        "Aantal": float(amount),
+                        "GAK (€)": item.get('avg_price', cost_basis/amount if amount>0 else 0),
+                        "Prijs": live_price if not data_failed else 0.0,
+                        "Waarde (€)": val_eur,
+                        "Inleg (€)": cost_eur,
+                        "Ongerealiseerd (€)": unrealized_profit,
+                        "Gerealiseerd (€)": realized_gain,
+                        "Dividend (€)": dividends,
+                        "Totale Winst (€)": total_profit,
+                        "Verwacht Div/J (€)": yearly_expected_div_eur,
+                        "Div CAGR (%)": div_cagr, 
+                        "Datum": buy_date,
+                        "Earnings": earnings_str,
+                        "Sector": ext_data.get('sector', 'Onbekend'),
+                        "_currency_code": ext_data.get('currency_code', 'EUR'),
+                        "_rate": eur_rate, 
+                        "Verwijder": False
+                    })
                 
-                q_type = ext_data.get('type', 'Aandeel')
-                sector = ext_data.get('sector', 'Onbekend')
-                country = ext_data.get('country', 'Onbekend')
-                short_name = ext_data.get('shortName', ticker)
-                long_name = ext_data.get('longName', ticker)
-                
-                amount = item['amount']
-                avg_price = item['avg_price']
-                
-                currency_code = ext_data.get('currency_code', 'EUR')
-                symbol = ext_data.get('currency_symbol', '€')
-                buy_date = item.get('buy_date', None)
-
-                eur_rate = get_currency_rate(currency_code, "EUR")
-                
-                val_native = live_price * amount
-                val_eur = val_native * eur_rate
-                
-                cost_eur = avg_price * amount
-                profit_eur = val_eur - cost_eur
-                
-                used_target = target_price if target_price else live_price
-                potential_eur = used_target * amount * eur_rate
-                total_potential_eur += potential_eur
-                
-                gak_eur = avg_price 
-
-                total_val_eur += val_eur
-                total_cost_eur += cost_eur
-                
-                if not data_failed:
-                    if ext_data.get('previous_close'):
-                        total_day_change_eur += (live_price - ext_data['previous_close']) * amount * eur_rate
-                    
-                    ytd_ref_price = ext_data.get('ytd_start_price')
-                    
-                    if buy_date and buy_date >= current_year_date:
-                        ytd_ref_price = avg_price 
-                    
-                    if ytd_ref_price and ytd_ref_price > 0:
-                        total_year_change_eur += (live_price - ytd_ref_price) * amount * eur_rate
-
-                yearly_div_eur = 0
-                if ext_data:
-                    if ext_data.get('dividend_history'):
-                        for div_pay in ext_data['dividend_history']:
-                            payout_eur = div_pay['amount'] * amount * eur_rate
-                            monthly_div_projection[div_pay['month']] += payout_eur
-                            yearly_div_eur += payout_eur
-                    elif ext_data.get('fallback_div_rate'):
-                        yearly_div_eur = ext_data['fallback_div_rate'] * amount * eur_rate
-                    elif ext_data.get('fallback_div_yield') and ext_data['fallback_div_yield'] > 0:
-                        yearly_div_eur = (live_price * ext_data['fallback_div_yield']) * amount * eur_rate
-                
-                total_div_eur += yearly_div_eur
-                
-                # --- NIEUW: DIVIDEND CAGR BEREKENEN ---
-                div_cagr = get_div_cagr(ticker)
-
-                sector_distribution[sector] = sector_distribution.get(sector, 0) + val_eur
-                country_distribution[country] = country_distribution.get(country, 0) + val_eur
-
-                if q_type == 'ETF':
-                    etf_stats['value'] += val_eur
-                    etf_stats['cost'] += cost_eur
-                    etf_stats['profit'] += profit_eur
                 else:
-                    stock_stats['value'] += val_eur
-                    stock_stats['cost'] += cost_eur
-                    stock_stats['profit'] += profit_eur
-
-                earnings_str = "-"
-                earnings_color = "black"
-                if ext_data:
-                    if ext_data.get('earnings_history'):
-                        earnings_history_store[ticker] = ext_data['earnings_history']
-                    
-                    if ext_data.get('earnings'):
-                        surp = ext_data['earnings']['surprise_pct']
-                        if surp > 0:
-                            earnings_str = f"Beat: +{surp:.1f}%"
-                            earnings_color = MATTE_COLORS["green"]
-                        else:
-                            earnings_str = f"Miss: {surp:.1f}%"
-                            earnings_color = MATTE_COLORS["red"]
-                
-                display_price = live_price
-                if data_failed:
-                    display_price = 0.0
-                    earnings_str = "⚠️ ERROR"
-
-                ticker_details_map[ticker] = {
-                    'shortName': short_name,
-                    'longName': long_name
-                }
-
-                portfolio_data.append({
-                    "Ticker": ticker,
-                    "Naam": short_name,
-                    "Type": q_type,
-                    "Aantal": float(amount),
-                    "GAK": float(avg_price),
-                    "GAK (€)": float(gak_eur),
-                    "Prijs": display_price,
-                    "Waarde (€)": val_eur,
-                    "Inleg (€)": cost_eur,
-                    "Winst (€)": profit_eur,
-                    "Div/Jaar (€)": yearly_div_eur,
-                    "Div CAGR (%)": div_cagr, 
-                    "Datum": buy_date,
-                    "Earnings": earnings_str,
-                    "_earnings_color": earnings_color,
-                    "Sector": sector,
-                    "Valuta": symbol,
-                    "_currency_code": currency_code,
-                    "_rate": eur_rate, 
-                    "Verwijder": False
-                })
+                    # Inactive Holdings (0 shares) -> Alleen winsten en dividend doortellen voor de totalen!
+                    total_realized_eur += realized_gain
+                    total_received_div_eur += dividends
+                    if p_class == 'FUND':
+                        etf_stats['realized'] += realized_gain
+                        etf_stats['dividends'] += dividends
+                    else:
+                        stock_stats['realized'] += realized_gain
+                        stock_stats['dividends'] += dividends
                 
             progress_bar.empty()
             
@@ -1070,45 +1080,57 @@ elif st.session_state["authentication_status"]:
 
             with st.expander("📈 Portfolio Overzicht & Sectoren", expanded=True):
                 k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
-                abs_profit = total_val_eur - total_cost_eur
-                pct_profit = (abs_profit / total_cost_eur * 100) if total_cost_eur else 0
-                yield_pct = (total_div_eur / total_val_eur * 100) if total_val_eur else 0
                 
-                k1.metric("Totale Waarde", f"€ {total_val_eur:,.2f}")
-                k2.metric("Potentiële Waarde", f"€ {total_potential_eur:,.2f}", help="Op basis van koersdoelen analisten")
-                k3.metric("Totaal Winst", f"€ {abs_profit:,.2f}", delta=f"{pct_profit:.1f}%")
+                # Totale winst inclusief eerder uitbetaalde bedragen
+                absolute_total_profit = total_unrealized_eur + total_realized_eur + total_received_div_eur
+                pct_total_profit = (absolute_total_profit / total_cost_eur * 100) if total_cost_eur > 0 else 0
+                yield_pct = (total_expected_div_eur / total_val_eur * 100) if total_val_eur > 0 else 0
+                
+                k1.metric("Actuele Waarde", f"€ {total_val_eur:,.2f}")
+                k2.metric("Huidige Inleg", f"€ {total_cost_eur:,.2f}", help="Je kostprijs van de aandelen die je nú bezit (Cost Basis).")
+                k3.metric("Totale Winst", f"€ {absolute_total_profit:,.2f}", delta=f"{pct_total_profit:.1f}%", help="Inclusief eerdere verkoopwinsten en ontvangen dividenden.")
                 k4.metric("Dag Resultaat", f"€ {total_day_change_eur:,.2f}", delta="Vandaag")
                 
                 ytd_pct = (total_year_change_eur / (total_val_eur - total_year_change_eur) * 100) if (total_val_eur - total_year_change_eur) > 0 else 0.0
                 k5.metric("Jaar Resultaat (YTD)", f"€ {total_year_change_eur:,.2f}", delta=f"{ytd_pct:.2f}%")
                 
-                k6.metric("Verwacht Dividend", f"€ {total_div_eur:,.2f}", delta="Jaarbasis")
+                k6.metric("Verwacht Dividend", f"€ {total_expected_div_eur:,.2f}", delta="Komend Jaar")
                 k7.metric("Portfolio Yield", f"{yield_pct:.2f}%")
                 
                 st.divider()
                 
                 st.markdown("### 📊 Rendement Benchmark: ETF's vs Losse Aandelen")
-                st.caption("Vergelijk direct of je losse aandelenselectie het beter doet dan je stabiele DCA in ETF's.")
+                st.caption("Vergelijk direct of je losse aandelenselectie het beter doet dan je stabiele DCA in ETF's. Deze berekening neemt al je verkoopwinsten en dividenden mee!")
                 
                 col_etf, col_stock, col_chart_vs = st.columns([1, 1, 2])
                 
-                etf_pct = (etf_stats['profit'] / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
-                stock_pct = (stock_stats['profit'] / stock_stats['cost'] * 100) if stock_stats['cost'] > 0 else 0
+                etf_unrealized = etf_stats['value'] - etf_stats['cost']
+                etf_total_profit = etf_unrealized + etf_stats['realized'] + etf_stats['dividends']
+                etf_pct = (etf_total_profit / etf_stats['cost'] * 100) if etf_stats['cost'] > 0 else 0
+                
+                stock_unrealized = stock_stats['value'] - stock_stats['cost']
+                stock_total_profit = stock_unrealized + stock_stats['realized'] + stock_stats['dividends']
+                stock_pct = (stock_total_profit / stock_stats['cost'] * 100) if stock_stats['cost'] > 0 else 0
                 
                 with col_etf:
-                    st.metric("ETF Rendement (Absoluut)", f"€ {etf_stats['profit']:,.2f}", f"{etf_pct:.1f}%")
+                    st.metric("ETF Totale Winst", f"€ {etf_total_profit:,.2f}", f"{etf_pct:.1f}%")
                 with col_stock:
-                    st.metric("Aandelen Rendement (Absoluut)", f"€ {stock_stats['profit']:,.2f}", f"{stock_pct:.1f}%")
+                    st.metric("Aandelen Totale Winst", f"€ {stock_total_profit:,.2f}", f"{stock_pct:.1f}%")
                 
                 with col_chart_vs:
                     df_vs = pd.DataFrame({
                         "Categorie": ["ETF", "ETF", "Losse Aandelen", "Losse Aandelen"],
-                        "Waarde Type": ["Geïnvesteerd Kapitaal", "Huidige Actuele Waarde", "Geïnvesteerd Kapitaal", "Huidige Actuele Waarde"],
-                        "Bedrag (€)": [etf_stats['cost'], etf_stats['value'], stock_stats['cost'], stock_stats['value']]
+                        "Waarde Type": ["Huidige Inleg", "Waarde + Gerealiseerde Winst", "Huidige Inleg", "Waarde + Gerealiseerde Winst"],
+                        "Bedrag (€)": [
+                            etf_stats['cost'], 
+                            etf_stats['value'] + etf_stats['realized'] + etf_stats['dividends'], 
+                            stock_stats['cost'], 
+                            stock_stats['value'] + stock_stats['realized'] + stock_stats['dividends']
+                        ]
                     })
                     fig_vs = px.bar(df_vs, x="Categorie", y="Bedrag (€)", color="Waarde Type", barmode="group", 
                                     color_discrete_sequence=[MATTE_COLORS["charcoal"], MATTE_COLORS["blue"]],
-                                    title="Inleg vs. Huidige Waarde")
+                                    title="Inleg vs. Totaal Rendement")
                     fig_vs.update_layout(height=250, margin=dict(t=30, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_vs, use_container_width=True)
 
@@ -1116,7 +1138,7 @@ elif st.session_state["authentication_status"]:
 
                 comp1, comp2, comp3 = st.columns(3)
                 with comp1:
-                    st.markdown("**Verdeling Kapitaal: Aandelen vs ETF's**")
+                    st.markdown("**Verdeling Actueel Kapitaal: Aandelen vs ETF's**")
                     fig_d1 = go.Figure(data=[go.Pie(
                         labels=['ETF', 'Aandelen'], 
                         values=[etf_stats['value'], stock_stats['value']], 
@@ -1177,7 +1199,7 @@ elif st.session_state["authentication_status"]:
                         st.plotly_chart(fig_d3, use_container_width=True)
 
             with st.expander("📅 Inleg Tijdlijn (DCA) & Verdeling", expanded=False):
-                st.markdown("Dit is de visuele weergave van de maand waarin je ETF's en aandelen hebt aangekocht. Let op: deze historie wordt opgebouwd zodra je de originele Trade Republic CSV uploadt.")
+                st.markdown("Dit is de visuele weergave van de maand waarin je ETF's en aandelen hebt aangekocht. Perfect om de continuïteit van je DCA-strategie te controleren.")
                 dca_hist = st.session_state.get('dca_history', {})
                 if dca_hist:
                     df_dca = pd.DataFrame([{"Maand": m, "Type": k, "Inleg (€)": v} for m, cats in dca_hist.items() for k, v in cats.items()])
@@ -1212,7 +1234,7 @@ elif st.session_state["authentication_status"]:
                 with col_div1:
                     monthly_vals = [monthly_div_projection[i] for i in range(1, 13)]
                     if sum(monthly_vals) > 0:
-                        st.markdown("**Maandelijks Dividend Projectie**")
+                        st.markdown("**Maandelijks Verwacht Dividend**")
                         months = ["Jan", "Feb", "Mrt", "Apr", "Mei", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dec"]
                         fig_bar = go.Figure([go.Bar(x=months, y=monthly_vals, marker_color=MATTE_COLORS["green"])])
                         fig_bar.update_layout(
@@ -1227,18 +1249,18 @@ elif st.session_state["authentication_status"]:
                     else:
                         st.info("Geen gedetailleerde uitbetalingsdata beschikbaar.")
                 with col_div2:
-                    st.markdown("**Dividend per Positie & Groei**")
+                    st.markdown("**Verwacht Dividend per Positie & Groei**")
                     df_charts = pd.DataFrame(portfolio_data)
                     if not df_charts.empty:
-                        df_charts = df_charts.sort_values(by="Div/Jaar (€)", ascending=False)
-                        fig_bar2 = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', 
+                        df_charts = df_charts.sort_values(by="Verwacht Div/J (€)", ascending=False)
+                        fig_bar2 = px.bar(df_charts, x='Ticker', y='Verwacht Div/J (€)', color='Sector', 
                                           hover_data={'Div CAGR (%)': ':.2f'},
                                           color_discrete_map=SECTOR_COLORS)
                         fig_bar2.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', height=300)
                         st.plotly_chart(fig_bar2, use_container_width=True)
 
             with st.expander("📋 Aandelen & Details", expanded=True):
-                st.info("💡 Bewerk 'GAK (€)', 'Aantal' of 'Datum' in de tabel. Selecteer een aandeel daaronder voor details.")
+                st.info("💡 Bewerk 'GAK (€)' of 'Aantal' in de tabel. Posities met 0 stuks worden hier verborgen, maar hun gerealiseerde winst telt wél mee in het dashboard!")
                 
                 df_editor_source = pd.DataFrame(portfolio_data)
                 
@@ -1247,13 +1269,13 @@ elif st.session_state["authentication_status"]:
                     "Naam": st.column_config.TextColumn("Naam", disabled=True),
                     "Type": st.column_config.TextColumn("Type", disabled=True),
                     "Aantal": st.column_config.NumberColumn("Aantal", min_value=0.0001, required=True, step=1.0),
-                    "GAK": st.column_config.NumberColumn("GAK (Origineel)", format="%.2f", disabled=True),
                     "GAK (€)": st.column_config.NumberColumn("GAK (€)", format="€ %.2f", disabled=False),
                     "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
-                    "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
-                    "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
-                    "Div CAGR (%)": st.column_config.NumberColumn("Div Groei (3j %)", format="%.1f%%", disabled=True), 
-                    "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", min_value=date(1980, 1, 1), max_value=date(2050, 12, 31)),
+                    "Ongerealiseerd (€)": st.column_config.NumberColumn("Ongerealiseerd", format="€ %.2f", disabled=True),
+                    "Gerealiseerd (€)": st.column_config.NumberColumn("Gerealiseerd", format="€ %.2f", disabled=True),
+                    "Dividend (€)": st.column_config.NumberColumn("Ontvangen Div", format="€ %.2f", disabled=True),
+                    "Totale Winst (€)": st.column_config.NumberColumn("Totale Winst (€)", format="€ %.2f", disabled=True),
+                    "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", disabled=False),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
                     "Verwijder": st.column_config.CheckboxColumn("🗑️", default=False)
@@ -1262,34 +1284,38 @@ elif st.session_state["authentication_status"]:
                 edited_df = st.data_editor(
                     df_editor_source, 
                     column_config=column_settings, 
-                    column_order=("Verwijder", "Ticker", "Naam", "Type", "Aantal", "GAK", "GAK (€)", "Datum", "Waarde (€)", "Winst (€)", "Weging", "Div/Jaar (€)", "Div CAGR (%)", "Earnings"), 
+                    column_order=("Verwijder", "Ticker", "Naam", "Aantal", "GAK (€)", "Waarde (€)", "Totale Winst (€)", "Datum", "Earnings"), 
                     hide_index=True, 
                     use_container_width=True, 
                     key="main_portfolio_editor"
                 )
 
                 if not df_editor_source.equals(edited_df):
-                    new_state_portfolio = []
+                    inactive_portfolio = [p for p in st.session_state['portfolio'] if p.get('amount', 0) <= 0.01]
+                    new_active_portfolio = []
+                    
                     for index, row in edited_df.iterrows():
                         if not row['Verwijder']:
-                            orig_row = df_editor_source.iloc[index] if index in df_editor_source.index else row
-                            new_gak_eur = row['GAK (€)']
-                            rate = row['_rate']
+                            # Vind het originele item terug om de gerealiseerde winst / dividend in tact te houden
+                            orig_item = next((item for item in st.session_state['portfolio'] if item['ticker'] == row['Ticker']), None)
+                            rate = row.get('_rate', 1.0)
                             
-                            if abs(new_gak_eur - orig_row['GAK (€)']) > 0.001:
-                                new_avg_price = new_gak_eur / rate if rate > 0 else new_gak_eur
-                            else:
-                                new_avg_price = row['GAK']
-
-                            new_state_portfolio.append({
+                            new_gak_eur = row['GAK (€)']
+                            cost_basis_eur = new_gak_eur * row['Aantal']
+                            
+                            new_active_portfolio.append({
                                 'ticker': row['Ticker'], 
                                 'amount': row['Aantal'], 
-                                'avg_price': new_avg_price, 
-                                'currency': row['_currency_code'], 
-                                'symbol': row['Valuta'],
+                                'avg_price': new_gak_eur, 
+                                'cost_basis': cost_basis_eur,
+                                'realized_gain': orig_item.get('realized_gain', 0.0) if orig_item else 0.0,
+                                'dividends': orig_item.get('dividends', 0.0) if orig_item else 0.0,
+                                'class': orig_item.get('class', 'Aandeel') if orig_item else 'Aandeel',
+                                'currency': orig_item.get('currency', 'EUR') if orig_item else 'EUR',
                                 'buy_date': row['Datum']
                             })
-                    st.session_state['portfolio'] = new_state_portfolio
+                            
+                    st.session_state['portfolio'] = inactive_portfolio + new_active_portfolio
                     save_portfolio_to_db()
                     st.rerun()
 
@@ -1423,7 +1449,7 @@ elif st.session_state["authentication_status"]:
     # TAB 3: WISHLIST 
     # --------------------------------------------------
     with tabs[2]:
-        st.subheader("❤️ Mijn Wishlist")
+        st.subheader("❤️️ Mijn Wishlist")
         if st.session_state['wishlist']:
             st.info("💡 Hier zie je je favoriete aandelen.")
             
@@ -1502,14 +1528,13 @@ elif st.session_state["authentication_status"]:
     # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
-        st.header("⚖️️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
+        st.header("⚖️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
         st.markdown("""
         Volgens de uitspraak van de **Hoge Raad (juni 2024)** is de vermogensbelasting in strijd met Europees recht als je werkelijke rendement lager is dan het forfaitaire (fictieve) rendement. Je betaalt daarom **de laagste van de twee**.
         """)
         
         tax_year = st.selectbox("Fiscaal Jaar", [2025, 2026], index=1)
         
-        # Tarieven 2025/2026
         heffingsvrij = 57684.0 
         tarief_box3 = 0.36
         
@@ -1530,18 +1555,19 @@ elif st.session_state["authentication_status"]:
                 
                 with st.spinner("Historische koersen robuust ophalen..."):
                     for p in st.session_state['portfolio']:
-                        try:
-                            tk_hist = yf.Ticker(p['ticker']).history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
-                            if not tk_hist.empty:
-                                jan_data = tk_hist[:d_jan1]
-                                dec_data = tk_hist[:d_dec31]
-                                
-                                p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
-                                p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
-                                
-                                calc_jan1 += (p_jan * p['amount'])
-                                calc_dec31 += (p_dec * p['amount'])
-                        except: pass
+                        if p.get('amount', 0) > 0.01:
+                            try:
+                                tk_hist = yf.Ticker(p['ticker']).history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
+                                if not tk_hist.empty:
+                                    jan_data = tk_hist[:d_jan1]
+                                    dec_data = tk_hist[:d_dec31]
+                                    
+                                    p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
+                                    p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
+                                    
+                                    calc_jan1 += (p_jan * p['amount'])
+                                    calc_dec31 += (p_dec * p['amount'])
+                            except: pass
                         
                 st.session_state.tax_val_jan1 = calc_jan1
                 st.session_state.tax_val_dec31 = calc_dec31
@@ -1555,7 +1581,6 @@ elif st.session_state["authentication_status"]:
         with col_man:
             st.subheader("2. Resultaat (Je betaalt de laagste)")
             
-            # METHODE 1: FORFAITAIR
             tot_vermogen = savings_amount + pf_val_jan1
             grondslag = max(0, tot_vermogen - heffingsvrij)
             
@@ -1567,7 +1592,6 @@ elif st.session_state["authentication_status"]:
             else:
                 tax_forfait = 0
             
-            # METHODE 2: WERKELIJK RENDEMENT
             koerswinst = pf_val_dec31 - pf_val_jan1 - netto_stortingen
             werkelijk_rendement = koerswinst + dividenden + savings_rente_werkelijk
             

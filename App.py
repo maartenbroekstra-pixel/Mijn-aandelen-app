@@ -48,16 +48,22 @@ def load_portfolio_from_db():
                 port = data.get('portfolio', [])
                 for p in port:
                     if 'buy_date' in p and p['buy_date']:
-                        try:
-                            p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
-                        except:
-                            p['buy_date'] = None
+                        try: p['buy_date'] = datetime.strptime(p['buy_date'], "%Y-%m-%d").date()
+                        except: p['buy_date'] = None
                 wishlist = data.get('wishlist', [])
                 dca_history = data.get('dca_history', {})
-                return port, wishlist, dca_history
+                
+                # Nieuw: Transacties inladen voor belasting berekening
+                transactions = data.get('transactions', [])
+                for t in transactions:
+                    if 'date' in t and t['date']:
+                        try: t['date'] = datetime.strptime(t['date'], "%Y-%m-%d").date()
+                        except: pass
+                        
+                return port, wishlist, dca_history, transactions
         except:
             pass
-    return [], [], {}
+    return [], [], {}, []
 
 def save_portfolio_to_db():
     serializable_port = []
@@ -67,10 +73,18 @@ def save_portfolio_to_db():
             p_copy['buy_date'] = p_copy['buy_date'].strftime("%Y-%m-%d")
         serializable_port.append(p_copy)
         
+    serializable_tx = []
+    for t in st.session_state.get('transactions', []):
+        t_copy = t.copy()
+        if 'date' in t_copy and isinstance(t_copy['date'], (date, datetime)):
+            t_copy['date'] = t_copy['date'].strftime("%Y-%m-%d")
+        serializable_tx.append(t_copy)
+        
     data = {
         'portfolio': serializable_port,
         'wishlist': st.session_state.get('wishlist', []),
-        'dca_history': st.session_state.get('dca_history', {})
+        'dca_history': st.session_state.get('dca_history', {}),
+        'transactions': serializable_tx
     }
     with open(DB_FILE, 'w') as f:
         json.dump(data, f)
@@ -135,10 +149,11 @@ elif st.session_state["authentication_status"]:
     # 2. STATE MANAGEMENT & INITIAL LOAD
     # ==================================================
     if 'portfolio' not in st.session_state:
-        p, w, d = load_portfolio_from_db()
+        p, w, d, tx = load_portfolio_from_db()
         st.session_state['portfolio'] = p
         st.session_state['wishlist'] = w
         st.session_state['dca_history'] = d
+        st.session_state['transactions'] = tx
 
     if 'search_results' not in st.session_state: st.session_state['search_results'] = []
     if 'search_main' not in st.session_state: st.session_state['search_main'] = ""
@@ -325,6 +340,7 @@ elif st.session_state["authentication_status"]:
         
         portfolio_dict = {}
         dca_history = {}
+        transactions_list = []
         df_trades = df[df['type'].isin(['BUY', 'SELL', 'DIVIDEND', 'MIGRATION', 'SPLIT', 'REVERSE_SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])].copy()
         
         for _, row in df_trades.sort_values('date').iterrows():
@@ -342,6 +358,16 @@ elif st.session_state["authentication_status"]:
             except: date_val = datetime.now().date()
             
             if pd.isna(isin) or str(isin).strip() == '': continue
+            
+            ticker = isin_to_yf.get(isin, isin)
+            
+            # Sla elke ruwe transactie op voor later gebruik bij de belasting module
+            transactions_list.append({
+                'ticker': ticker,
+                'type': t_type,
+                'shares': shares_raw,
+                'date': date_val
+            })
             
             if isin not in portfolio_dict:
                 portfolio_dict[isin] = {'shares': 0.0, 'total_buys': 0.0, 'total_sells': 0.0, 'total_dividends': 0.0, 'class': 'FUND' if a_class == 'FUND' else 'Aandeel', 'buy_date': date_val}
@@ -386,7 +412,7 @@ elif st.session_state["authentication_status"]:
                 'symbol': '€',
                 'buy_date': data['buy_date']
             })
-        return new_portfolio, dca_history
+        return new_portfolio, dca_history, transactions_list
 
     # ==================================================
     # 4. DATA ENGINE
@@ -495,10 +521,11 @@ elif st.session_state["authentication_status"]:
     uploaded_csv = st.sidebar.file_uploader("📈 Importeer Broker CSV", type=['csv'], help="Upload je Trade Republic transactie-export")
     if uploaded_csv and st.sidebar.button("Verwerk CSV"):
         try:
-            parsed_portfolio, parsed_dca = parse_tr_csv(uploaded_csv)
+            parsed_portfolio, parsed_dca, parsed_tx = parse_tr_csv(uploaded_csv)
             if parsed_portfolio:
                 st.session_state['portfolio'] = parsed_portfolio
                 st.session_state['dca_history'] = parsed_dca
+                st.session_state['transactions'] = parsed_tx
                 save_portfolio_to_db()
                 active_count = len([p for p in parsed_portfolio if p['amount'] > 0.01])
                 st.sidebar.success(f"Ingeladen: {active_count} actieve posities en historische data!")
@@ -522,7 +549,13 @@ elif st.session_state["authentication_status"]:
             help="Download je verrijkte portfoliodata voor gebruik in Excel of data-analyse tools."
         )
 
-    json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[]), 'dca_history': st.session_state.get('dca_history',{})}, default=str)
+    json_export = json.dumps({
+        'portfolio': st.session_state.get('portfolio',[]), 
+        'wishlist': st.session_state.get('wishlist',[]), 
+        'dca_history': st.session_state.get('dca_history',{}),
+        'transactions': st.session_state.get('transactions', [])
+    }, default=str)
+    
     st.sidebar.download_button(
         label="⬇️ Download Backup (JSON)",
         data=json_export,
@@ -548,6 +581,14 @@ elif st.session_state["authentication_status"]:
                 
             if 'dca_history' in loaded_data:
                 st.session_state['dca_history'] = loaded_data['dca_history']
+                
+            if 'transactions' in loaded_data:
+                txs = loaded_data['transactions']
+                for t in txs:
+                    if 'date' in t and t['date']:
+                        try: t['date'] = datetime.strptime(t['date'], "%Y-%m-%d").date()
+                        except: pass
+                st.session_state['transactions'] = txs
             
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
@@ -734,11 +775,18 @@ elif st.session_state["authentication_status"]:
                                     'symbol': curr_sym,
                                     'buy_date': date_input
                                 })
+                                if 'transactions' not in st.session_state: st.session_state['transactions'] = []
+                                st.session_state['transactions'].append({
+                                    'ticker': selected_ticker,
+                                    'type': 'BUY',
+                                    'shares': amount_input,
+                                    'date': date_input
+                                })
                                 save_portfolio_to_db()
                                 st.success(f"{selected_ticker} toegevoegd!")
                                 st.rerun()
                 with col_wish:
-                    if st.button("❤️ Zet op Wishlist", use_container_width=True):
+                    if st.button("❤️️ Zet op Wishlist", use_container_width=True):
                         st.session_state['wishlist'].append({'ticker': selected_ticker, 'name': info.get('shortName', selected_ticker)})
                         save_portfolio_to_db()
                         st.toast("Toegevoegd aan Wishlist!")
@@ -1333,7 +1381,7 @@ elif st.session_state["authentication_status"]:
     # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
-        st.header("⚖️ Box 3 Belasting Calculator (2025 - 2028)")
+        st.header("⚖️️ Box 3 Belasting Calculator (2025 - 2028)")
         st.markdown("""
         Volgens de uitspraak van de **Hoge Raad** betaal je in 2025/2026/2027 de laagste van de twee stelsels (forfaitair vs werkelijk).
         Vanaf **2028** stapt het kabinet over op **vermogenswinstbelasting** (met een heffingsvrij resultaat van € 1.000).
@@ -1390,12 +1438,42 @@ elif st.session_state["authentication_status"]:
                     d_jan1 = f"{tax_year}-01-01"
                     d_dec31 = f"{tax_year}-12-31"
                     
-                    with st.spinner("Historische koersen robuust ophalen (inclusief valuta-omrekening)..."):
-                        for p in st.session_state['portfolio']:
-                            if p.get('amount', 0) > 0.01:
+                    target_date_jan1 = date(tax_year, 1, 1)
+                    target_date_dec31 = date(tax_year, 12, 31)
+
+                    # Hulpfunctie om het exacte aantal aandelen op een specifieke datum te bepalen
+                    def get_shares_on_date(target_date, ticker):
+                        if 'transactions' in st.session_state and st.session_state['transactions']:
+                            shares = 0.0
+                            for t in st.session_state['transactions']:
+                                if t['ticker'] == ticker and t['date'] <= target_date:
+                                    if t['type'] in ['BUY', 'MIGRATION', 'SPLIT', 'REVERSE_SPLIT']:
+                                        shares += t['shares']
+                                    elif t['type'] == 'SELL':
+                                        shares -= abs(t['shares'])
+                            return max(0.0, shares)
+                        else:
+                            # Fallback als we geen transactiegeschiedenis hebben opgebouwd
+                            port_item = next((item for item in st.session_state['portfolio'] if item['ticker'] == ticker), None)
+                            if port_item and port_item.get('buy_date') and port_item['buy_date'] <= target_date:
+                                return port_item.get('amount', 0.0)
+                            elif port_item and not port_item.get('buy_date'):
+                                return port_item.get('amount', 0.0)
+                            return 0.0
+                    
+                    with st.spinner("Historische koersen & exacte aantallen ophalen (inclusief valuta-omrekening)..."):
+                        all_tickers = set([p['ticker'] for p in st.session_state['portfolio']])
+                        if 'transactions' in st.session_state:
+                            all_tickers.update([t['ticker'] for t in st.session_state['transactions']])
+
+                        for ticker in all_tickers:
+                            shares_jan1 = get_shares_on_date(target_date_jan1, ticker)
+                            shares_dec31 = get_shares_on_date(target_date_dec31, ticker)
+                            
+                            if shares_jan1 > 0.0001 or shares_dec31 > 0.0001:
                                 try:
-                                    tk = yf.Ticker(p['ticker'])
-                                    currency = tk.info.get('currency', 'EUR')
+                                    tk = yf.Ticker(ticker)
+                                    currency = tk.info.get('currency', 'EUR') if hasattr(tk, 'info') and tk.info else 'EUR'
                                     rate = get_currency_rate(currency, 'EUR')
                                     
                                     tk_hist = tk.history(start=f"{tax_year-1}-12-25", end=f"{tax_year+1}-01-10")
@@ -1409,15 +1487,15 @@ elif st.session_state["authentication_status"]:
                                         p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
                                         p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else p_jan
                                         
-                                        calc_jan1 += (p_jan * p['amount'] * rate)
-                                        calc_dec31 += (p_dec * p['amount'] * rate)
+                                        calc_jan1 += (p_jan * shares_jan1 * rate)
+                                        calc_dec31 += (p_dec * shares_dec31 * rate)
                                 except Exception as e: 
-                                    st.warning(f"Kon {p['ticker']} niet ophalen: {e}")
+                                    st.warning(f"Kon {ticker} niet ophalen: {e}")
                                     pass
                             
                     st.session_state.tax_val_jan1 = calc_jan1
                     st.session_state.tax_val_dec31 = calc_dec31
-                    st.success("Waardes succesvol berekend en omgerekend naar EUR!")
+                    st.success("Waardes succesvol berekend o.b.v. je daadwerkelijke transactiegeschiedenis!")
 
                 pf_val_jan1 = st.number_input(f"Waarde Beleggingen op 1 jan {tax_year} (€)", value=float(st.session_state.get('tax_val_jan1', 0.0)))
                 pf_val_dec31 = st.number_input(f"Waarde Beleggingen op 31 dec {tax_year} (€)", value=float(st.session_state.get('tax_val_dec31', 0.0)))

@@ -95,7 +95,6 @@ elif st.session_state["authentication_status"]:
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    # UITGEBREIDE MAP: Europese Tickers -> US Tickers (voor Finviz / Fundamentals)
     EU_TO_US_MAP = {
         "HEIA.AS": "HEINY", "HEI.DE": "HEINY", "AD.AS": "ADRNY", "UNA.AS": "UL",
         "VOW3.DE": "VWAGY", "ADS.DE": "ADDYY", "BMW.DE": "BMWYY", "DTE.DE": "DTEGY",
@@ -104,13 +103,7 @@ elif st.session_state["authentication_status"]:
         "MT.AS": "MT", "DSM.AS": "DSM", "2PP.DE": "PYPL", "NOVO-B.CO": "NVO",
         "NOVO-B.DE": "NVO", "BESI.AS": "BESIY", "0DD.F": "PDD", "SHELL.AS": "SHEL",
         "WKL.AS": "WTKWY", "9PDA.DU": "PROSY", "RAND.AS": "RANJY", "AKZA.AS": "AKZOY",
-        "DSM.AS": "DSM", "KPN.AS": "KKPNY", "NN.AS": "NNGP", "ASM.AS": "ASMIY",
-        "B1C.DE": "BIDU", "WDP.DE": "DIS", "INL.DE": "INTC", "NKE.DE": "NKE", 
-        "PFE.DE": "PFE", "SQMA.DE": "SQM", "AHLA.DE": "BABA", "PEP.DE": "PEP", 
-        "JDO.DE": "JD", "JNJ.DE": "JNJ", "AMD.DE": "AMD", "AMZ.DE": "AMZN", 
-        "ABEA.DE": "GOOGL", "ORC.DE": "ORCL", "MSF.DE": "MSFT", "LLY.DE": "LLY", 
-        "0A8.F": "GRAB", "FOO.DE": "CRM", "82L.DE": "LAZR", "NOVC.DE": "NVO", 
-        "NNND.DE": "TCEHY", "N1W.DE": "NOW", "APC.DE": "AAPL"
+        "DSM.AS": "DSM", "KPN.AS": "KKPNY", "NN.AS": "NNGP", "ASM.AS": "ASMIY"
     }
 
     TOOLTIPS = {
@@ -308,50 +301,34 @@ elif st.session_state["authentication_status"]:
     def get_extended_portfolio_data(ticker):
         try:
             tk = yf.Ticker(ticker)
-            fast_info = tk.fast_info 
             info = tk.info
+            if not isinstance(info, dict):
+                info = {}
+                
+            # --- SUPER FALLBACK: Haal historische chart op als de info API plat ligt ---
+            hist = tk.history(period="5d")
+            hist_price = float(hist['Close'].iloc[-1]) if not hist.empty else 0.0
+            hist_prev = float(hist['Close'].iloc[-2]) if len(hist) > 1 else hist_price
             
-            # --- NIEUW: US Ticker Fallback voor ontbrekende EUR Data ---
-            us_ticker_str = EU_TO_US_MAP.get(ticker)
-            if us_ticker_str and (not info.get('targetMeanPrice') or not info.get('dividendYield')):
-                try:
-                    info_us = yf.Ticker(us_ticker_str).info
-                    if not info.get('targetMeanPrice'): info['targetMeanPrice'] = info_us.get('targetMeanPrice')
-                    if not info.get('dividendYield'): info['dividendYield'] = info_us.get('dividendYield')
-                    if not info.get('dividendRate'): info['dividendRate'] = info_us.get('dividendRate')
-                except: pass
+            if hist_price == 0.0 and not info.get('currentPrice'):
+                return None 
 
-            if not info or ('regularMarketPreviousClose' not in info and 'currentPrice' not in info):
-                if fast_info and hasattr(fast_info, 'last_price'):
-                    current_price = fast_info.last_price
-                    previous_close = fast_info.previous_close
-                    info = {
-                        'quoteType': 'EQUITY', 'sector': 'Onbekend', 'country': 'Onbekend',
-                        'currencySymbol': '?', 'shortName': ticker, 'longName': ticker
-                    }
-                else:
-                    return None 
-
-            q_type = info.get('quoteType', 'EQUITY').upper()
-            if 'ETF' in q_type: q_type = 'ETF'
-            else: q_type = 'Aandeel'
-            
+            q_type = 'ETF' if 'ETF' in info.get('quoteType', 'EQUITY', '').upper() else 'Aandeel'
             country = info.get('country', 'Onbekend')
                 
             earnings_history_list = get_reliable_earnings(ticker)
             earnings_surprise = None
-            
             if earnings_history_list:
                 last = earnings_history_list[-1]
                 earnings_surprise = {'date': last['date'], 'surprise_pct': last['surprise']}
 
             dividend_months = []
             try:
-                hist = tk.dividends
-                if not hist.empty:
-                    if hist.index.tz is not None: hist.index = hist.index.tz_localize(None)
+                hist_div = tk.dividends
+                if not hist_div.empty:
+                    if hist_div.index.tz is not None: hist_div.index = hist_div.index.tz_localize(None)
                     last_year = datetime.now() - timedelta(days=365)
-                    recent_divs = hist[hist.index > last_year]
+                    recent_divs = hist_div[hist_div.index > last_year]
                     for date_val, amount in recent_divs.items():
                         dividend_months.append({'month': date_val.month, 'amount': amount})
             except: pass
@@ -365,18 +342,16 @@ elif st.session_state["authentication_status"]:
                     ytd_start_price = hist_ytd['Close'].iloc[0]
             except: pass
 
-            current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose')
-            previous_close = info.get('regularMarketPreviousClose')
+            current_price = info.get('currentPrice') or info.get('regularMarketPreviousClose') or hist_price
+            previous_close = info.get('regularMarketPreviousClose') or hist_prev
             target_price = info.get('targetMeanPrice')
-
-            if not current_price:
-                try: current_price = tk.fast_info.last_price
-                except: pass
             
-            day_change_pct = 0.0
-            if current_price and previous_close:
-                day_change_pct = ((current_price - previous_close) / previous_close) * 100
-
+            day_change_pct = ((current_price - previous_close) / previous_close * 100) if current_price and previous_close else 0.0
+            
+            currency_code = info.get('currency')
+            if not currency_code:
+                currency_code = 'USD' if '.' not in ticker else 'EUR'
+                
             return {
                 'type': q_type,
                 'earnings': earnings_surprise,
@@ -389,8 +364,8 @@ elif st.session_state["authentication_status"]:
                 'target_price': target_price,
                 'previous_close': previous_close,
                 'ytd_start_price': ytd_start_price,
-                'currency_code': info.get('currency', 'EUR'),
-                'currency_symbol': info.get('currencySymbol', '€'),
+                'currency_code': currency_code,
+                'currency_symbol': info.get('currencySymbol', '€' if currency_code == 'EUR' else '$'),
                 'shortName': info.get('shortName', ticker),
                 'longName': info.get('longName', ticker),
                 'fallback_div_rate': info.get('dividendRate'),
@@ -439,21 +414,21 @@ elif st.session_state["authentication_status"]:
     def parse_tr_csv(uploaded_file):
         df = pd.read_csv(uploaded_file)
         
-        # --- NIEUW: US ISINs mappen direct naar de EUR genoteerde (.DE of .F) tickers ---
+        # WE ZIJN TERUG NAAR DE ORIGINELE EN BETROUWBARE AMERIKAANSE TICKERS (GEEN .DE OF .F)
         isin_to_yf = {
-            "IE00BK5BQT80": "VWCE.DE", "US0567521085": "B1C.DE", "US7223041028": "0DD.F",
-            "NL0012015705": "TKWY.AS", "US2546871060": "WDP.DE", "US4581401001": "INL.DE",
-            "US6541061031": "NKE.DE", "US7170811035": "PFE.DE", "US70450Y1038": "2PP.DE",
-            "US8336351056": "SQMA.DE", "NL0010273215": "ASML.AS", "IE0003XJA0J9": "WEBN.DE",
-            "NL0000009165": "HEIA.AS", "US01609W1027": "AHLA.DE", "US7134481081": "PEP.DE",
-            "DE0007664005": "VOW3.DE", "US7960508882": "SSUN.F", "US47215P1066": "JDO.DE",
-            "US4781601046": "JNJ.DE", "DK0062498333": "NOVO-B.DE", "GB00BP6MXD84": "SHELL.AS",
-            "US0079031078": "AMD.DE", "US0231351067": "AMZ.DE", "NL0012866412": "BESI.AS",
-            "NL0000395903": "WKL.AS", "US02079K3059": "ABEA.DE", "US68389X1054": "ORC.DE",
-            "US5949181045": "MSF.DE", "US5324571083": "LLY.DE", "ES0119037010": "CBAV.MC",
-            "KYG4124C1096": "0A8.F", "US79466L3024": "FOO.DE", "US5504241051": "82L.DE", 
-            "US5504243032": "82L.DE", "US6701002056": "NOVC.DE", "KYG875721634": "NNND.DE", 
-            "US81762P1021": "N1W.DE"
+            "IE00BK5BQT80": "VWCE.DE", "US0567521085": "BIDU", "US7223041028": "PDD",
+            "NL0012015705": "TKWY.AS", "US2546871060": "DIS", "US4581401001": "INTC",
+            "US6541061031": "NKE", "US7170811035": "PFE", "US70450Y1038": "PYPL",
+            "US8336351056": "SQM", "NL0010273215": "ASML.AS", "IE0003XJA0J9": "WEBN.DE",
+            "NL0000009165": "HEIA.AS", "US01609W1027": "BABA", "US7134481081": "PEP",
+            "DE0007664005": "VOW3.DE", "US7960508882": "SSUN.F", "US47215P1066": "JD",
+            "US4781601046": "JNJ", "DK0062498333": "NOVO-B.CO", "GB00BP6MXD84": "SHELL.AS",
+            "US0079031078": "AMD", "US0231351067": "AMZN", "NL0012866412": "BESI.AS",
+            "NL0000395903": "WKL.AS", "US02079K3059": "GOOGL", "US68389X1054": "ORCL",
+            "US5949181045": "MSFT", "US5324571083": "LLY", "ES0119037010": "CBAV.MC",
+            "KYG4124C1096": "GRAB", "US79466L3024": "CRM", "US5504241051": "LAZR", 
+            "US5504243032": "LAZR", "US6701002056": "NVO", "KYG875721634": "TCEHY", 
+            "US81762P1021": "NOW"
         }
         
         portfolio_dict = {}
@@ -774,7 +749,6 @@ elif st.session_state["authentication_status"]:
 
         if selected_ticker:
             try:
-                # Hier gebruikt de Analyze tab de mapping om diepe data (US) te combineren met je keuze
                 us_equivalent = EU_TO_US_MAP.get(selected_ticker, selected_ticker.split('.')[0] if '.' in selected_ticker else selected_ticker)
                 engine = DataEngine(us_equivalent, selected_ticker)
                 info = engine.yf_info
@@ -1260,7 +1234,7 @@ elif st.session_state["authentication_status"]:
                     "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", disabled=False),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
-                    "Verwijder": st.column_config.CheckboxColumn("🗑️️", default=False)
+                    "Verwijder": st.column_config.CheckboxColumn("🗑", default=False)
                 }
                 
                 edited_df = st.data_editor(
@@ -1536,8 +1510,8 @@ elif st.session_state["authentication_status"]:
                                     jan_data = tk_hist[:d_jan1]
                                     dec_data = tk_hist[:d_dec31]
                                     
-                                    p_jan = jan_data['Close'].iloc[-1] if not jan_data.empty else 0
-                                    p_dec = dec_data['Close'].iloc[-1] if not dec_data.empty else 0
+                                    p_jan = float(jan_data['Close'].iloc[-1]) if not jan_data.empty else 0
+                                    p_dec = float(dec_data['Close'].iloc[-1]) if not dec_data.empty else 0
                                     
                                     calc_jan1 += (p_jan * p['amount'])
                                     calc_dec31 += (p_dec * p['amount'])

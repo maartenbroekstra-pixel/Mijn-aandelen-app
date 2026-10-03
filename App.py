@@ -53,10 +53,11 @@ def load_portfolio_from_db():
                         except:
                             p['buy_date'] = None
                 wishlist = data.get('wishlist', [])
-                return port, wishlist
+                dca_history = data.get('dca_history', {})
+                return port, wishlist, dca_history
         except:
             pass
-    return [], []
+    return [], [], {}
 
 def save_portfolio_to_db():
     serializable_port = []
@@ -68,7 +69,8 @@ def save_portfolio_to_db():
         
     data = {
         'portfolio': serializable_port,
-        'wishlist': st.session_state.get('wishlist', [])
+        'wishlist': st.session_state.get('wishlist', []),
+        'dca_history': st.session_state.get('dca_history', {})
     }
     with open(DB_FILE, 'w') as f:
         json.dump(data, f)
@@ -145,9 +147,10 @@ elif st.session_state["authentication_status"]:
     # 2. STATE MANAGEMENT & INITIAL LOAD
     # ==================================================
     if 'portfolio' not in st.session_state:
-        p, w = load_portfolio_from_db()
+        p, w, d = load_portfolio_from_db()
         st.session_state['portfolio'] = p
         st.session_state['wishlist'] = w
+        st.session_state['dca_history'] = d
 
     if 'search_results' not in st.session_state:
         st.session_state['search_results'] = []
@@ -438,12 +441,14 @@ elif st.session_state["authentication_status"]:
         }
         
         portfolio_dict = {}
+        dca_history = {}
         
-        # INCLUSIEF REVERSE SPLIT EN MIGRATION
         df_trades = df[df['type'].isin(['BUY', 'SELL', 'MIGRATION', 'REVERSE_SPLIT', 'SPLIT']) & df['asset_class'].isin(['STOCK', 'FUND'])]
         
         for _, row in df_trades.iterrows():
             isin = row['symbol']
+            t_type = row['type']
+            a_class = row['asset_class']
             
             try: shares_raw = float(row['shares'])
             except: shares_raw = 0.0
@@ -451,16 +456,30 @@ elif st.session_state["authentication_status"]:
             try: price = float(row['price'])
             except: price = 0.0
                 
+            try: amount_val = float(row['amount'])
+            except: amount_val = 0.0
+                
             try: date_val = datetime.strptime(str(row['date']).split('T')[0], "%Y-%m-%d").date()
             except: date_val = datetime.now().date()
             
             if isin not in portfolio_dict:
                 portfolio_dict[isin] = {'shares': 0.0, 'total_invested': 0.0, 'date': date_val}
             
-            if shares_raw > 0:
+            month_str = date_val.strftime('%Y-%m')
+            cat = 'ETF' if a_class == 'FUND' else 'Aandeel'
+            
+            if t_type == 'BUY':
                 portfolio_dict[isin]['shares'] += shares_raw
-                portfolio_dict[isin]['total_invested'] += (shares_raw * price)
-            elif shares_raw < 0:
+                # amount_val is often negative for buys, so we take abs(). Fallback to shares*price
+                invested = abs(amount_val) if amount_val != 0 else (shares_raw * price)
+                portfolio_dict[isin]['total_invested'] += invested
+                
+                # Registreer voor DCA history per unieke maand
+                if month_str not in dca_history:
+                    dca_history[month_str] = {'ETF': 0, 'Aandeel': 0}
+                dca_history[month_str][cat] += invested
+                
+            elif t_type == 'SELL':
                 abs_shares = abs(shares_raw)
                 old_shares = portfolio_dict[isin]['shares']
                 portfolio_dict[isin]['shares'] -= abs_shares
@@ -472,6 +491,10 @@ elif st.session_state["authentication_status"]:
                     portfolio_dict[isin]['total_invested'] -= (abs_shares * (portfolio_dict[isin]['total_invested'] / old_shares))
                 else:
                     portfolio_dict[isin]['total_invested'] = 0.0
+            
+            elif t_type in ['MIGRATION', 'SPLIT', 'REVERSE_SPLIT']:
+                # Een migratie of split verandert alleen het aantal stuks, NIET het geïnvesteerde vermogen!
+                portfolio_dict[isin]['shares'] += shares_raw
                     
         new_portfolio = []
         for isin, data in portfolio_dict.items():
@@ -487,7 +510,7 @@ elif st.session_state["authentication_status"]:
                     'symbol': '€',
                     'buy_date': data['date']
                 })
-        return new_portfolio
+        return new_portfolio, dca_history
 
     # ==================================================
     # 4. DATA ENGINE
@@ -615,9 +638,10 @@ elif st.session_state["authentication_status"]:
     uploaded_csv = st.sidebar.file_uploader("📈 Importeer Broker CSV", type=['csv'], help="Upload je Trade Republic transactie-export")
     if uploaded_csv and st.sidebar.button("Verwerk CSV"):
         try:
-            parsed_portfolio = parse_tr_csv(uploaded_csv)
+            parsed_portfolio, parsed_dca = parse_tr_csv(uploaded_csv)
             if parsed_portfolio:
                 st.session_state['portfolio'] = parsed_portfolio
+                st.session_state['dca_history'] = parsed_dca
                 save_portfolio_to_db()
                 st.sidebar.success(f"{len(parsed_portfolio)} posities succesvol ingeladen!")
                 time.sleep(1)
@@ -641,7 +665,7 @@ elif st.session_state["authentication_status"]:
             help="Download je verrijkte portfoliodata voor gebruik in Excel of data-analyse tools."
         )
 
-    json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[])}, default=str)
+    json_export = json.dumps({'portfolio': st.session_state.get('portfolio',[]), 'wishlist': st.session_state.get('wishlist',[]), 'dca_history': st.session_state.get('dca_history',{})}, default=str)
     st.sidebar.download_button(
         label="⬇️ Download Backup (JSON)",
         data=json_export,
@@ -664,6 +688,9 @@ elif st.session_state["authentication_status"]:
                 st.session_state['wishlist'] = loaded_data['wishlist']
             elif 'w' in loaded_data: 
                 st.session_state['wishlist'] = loaded_data['w']
+                
+            if 'dca_history' in loaded_data:
+                st.session_state['dca_history'] = loaded_data['dca_history']
             
             save_portfolio_to_db() 
             st.toast("Data succesvol geladen!", icon="✅")
@@ -679,7 +706,7 @@ elif st.session_state["authentication_status"]:
     # ==================================================
     # 7. HOOFDINTERFACE TABS
     # ==================================================
-    tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️ Wishlist", "🇳🇱 Belasting"])
+    tabs = st.tabs(["🔎 Analyse", "📊 Portfolio Pro", "❤️️ Wishlist", "🇳🇱 Belasting"])
 
     # --------------------------------------------------
     # TAB 1: ANALYSE
@@ -1017,10 +1044,10 @@ elif st.session_state["authentication_status"]:
                     "GAK (€)": float(gak_eur),
                     "Prijs": display_price,
                     "Waarde (€)": val_eur,
-                    "Inleg (€)": cost_eur, # Voor DCA visualisatie
+                    "Inleg (€)": cost_eur,
                     "Winst (€)": profit_eur,
                     "Div/Jaar (€)": yearly_div_eur,
-                    "Div CAGR (%)": div_cagr, # Nieuwe CAGR metric
+                    "Div CAGR (%)": div_cagr, 
                     "Datum": buy_date,
                     "Earnings": earnings_str,
                     "_earnings_color": earnings_color,
@@ -1074,7 +1101,6 @@ elif st.session_state["authentication_status"]:
                     st.metric("Aandelen Rendement (Absoluut)", f"€ {stock_stats['profit']:,.2f}", f"{stock_pct:.1f}%")
                 
                 with col_chart_vs:
-                    # --- NIEUW: VISUELE BENCHMARK ETF VS AANDELEN ---
                     df_vs = pd.DataFrame({
                         "Categorie": ["ETF", "ETF", "Losse Aandelen", "Losse Aandelen"],
                         "Waarde Type": ["Geïnvesteerd Kapitaal", "Huidige Actuele Waarde", "Geïnvesteerd Kapitaal", "Huidige Actuele Waarde"],
@@ -1100,8 +1126,12 @@ elif st.session_state["authentication_status"]:
                     )])
                     fig_d1.update_traces(marker=dict(colors=[MATTE_COLORS["blue"], MATTE_COLORS["red"]]))
                     fig_d1.update_layout(
-                        showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
-                        margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                        showlegend=True,
+                        legend=dict(orientation="h", y=-0.1), 
+                        height=200, 
+                        margin=dict(t=0, b=0, l=0, r=0),
+                        plot_bgcolor='rgba(0,0,0,0)', 
+                        paper_bgcolor='rgba(0,0,0,0)'
                     )
                     st.plotly_chart(fig_d1, use_container_width=True)
 
@@ -1111,12 +1141,18 @@ elif st.session_state["authentication_status"]:
                         fig_d2 = go.Figure(data=[go.Pie(
                             labels=list(sector_distribution.keys()), 
                             values=list(sector_distribution.values()), 
-                            hole=.6, textposition='inside', textinfo='percent'
+                            hole=.6,
+                            textposition='inside',
+                            textinfo='percent'
                         )])
                         fig_d2.update_traces(marker=dict(colors=[SECTOR_COLORS.get(k, '#ccc') for k in sector_distribution.keys()]))
                         fig_d2.update_layout(
-                            showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
-                            margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                            showlegend=True,
+                            legend=dict(orientation="h", y=-0.1),
+                            height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0),
+                            plot_bgcolor='rgba(0,0,0,0)', 
+                            paper_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_d2, use_container_width=True)
                 
@@ -1126,33 +1162,36 @@ elif st.session_state["authentication_status"]:
                         fig_d3 = go.Figure(data=[go.Pie(
                             labels=list(country_distribution.keys()), 
                             values=list(country_distribution.values()), 
-                            hole=.6, textposition='inside', textinfo='percent'
+                            hole=.6,
+                            textposition='inside',
+                            textinfo='percent'
                         )])
                         fig_d3.update_layout(
-                            showlegend=True, legend=dict(orientation="h", y=-0.1), height=200, 
-                            margin=dict(t=0, b=0, l=0, r=0), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+                            showlegend=True,
+                            legend=dict(orientation="h", y=-0.1),
+                            height=200, 
+                            margin=dict(t=0, b=0, l=0, r=0),
+                            plot_bgcolor='rgba(0,0,0,0)', 
+                            paper_bgcolor='rgba(0,0,0,0)'
                         )
                         st.plotly_chart(fig_d3, use_container_width=True)
 
-            # --- NIEUW: DCA INLEG TIJDLIJN ---
             with st.expander("📅 Inleg Tijdlijn (DCA) & Verdeling", expanded=False):
-                st.markdown("Dit is de visuele weergave van de maand waarin je je huidige posities hebt aangekocht. Perfect om de continuïteit van je DCA-strategie te controleren.")
-                df_dca_base = pd.DataFrame(portfolio_data)
-                if not df_dca_base.empty and 'Datum' in df_dca_base.columns:
-                    df_dca_base['Maand'] = pd.to_datetime(df_dca_base['Datum']).dt.to_period('M').astype(str)
-                    df_dca_grouped = df_dca_base.groupby(['Maand', 'Type'])['Inleg (€)'].sum().reset_index()
-                    df_dca_grouped = df_dca_grouped.sort_values(by='Maand')
+                st.markdown("Dit is de visuele weergave van de maand waarin je ETF's en aandelen hebt aangekocht. Let op: deze historie wordt opgebouwd zodra je de originele Trade Republic CSV uploadt.")
+                dca_hist = st.session_state.get('dca_history', {})
+                if dca_hist:
+                    df_dca = pd.DataFrame([{"Maand": m, "Type": k, "Inleg (€)": v} for m, cats in dca_hist.items() for k, v in cats.items()])
+                    df_dca = df_dca.sort_values(by="Maand")
                     
-                    fig_dca = px.bar(df_dca_grouped, x='Maand', y='Inleg (€)', color='Type', 
+                    fig_dca = px.bar(df_dca, x='Maand', y='Inleg (€)', color='Type', 
                                      title='Totaal Geïnvesteerd Kapitaal per Aankoopmaand',
                                      color_discrete_sequence=[MATTE_COLORS["blue"], MATTE_COLORS["red"]])
                     fig_dca.update_layout(height=350, xaxis_title="Maand van Aankoop", yaxis_title="Geïnvesteerd (€)",
                                           plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     st.plotly_chart(fig_dca, use_container_width=True)
                 else:
-                    st.info("Geen aankoopdatums gevonden om de DCA-tijdlijn op te bouwen.")
+                    st.info("Geen aankoopdatums gevonden om de DCA-tijdlijn op te bouwen. Upload je actuele CSV in de sidebar.")
 
-            # --- NIEUW: CORRELATIE MATRIX ---
             with st.expander("🔗 Risico & Correlatie Matrix", expanded=False):
                 st.markdown("Vergelijk hoe de koersen van je top-10 posities in het afgelopen jaar op elkaar reageerden. **1.0 = Perfecte meebeweging, -1.0 = Tegengestelde beweging.**")
                 if len(portfolio_data) > 1:
@@ -1192,7 +1231,6 @@ elif st.session_state["authentication_status"]:
                     df_charts = pd.DataFrame(portfolio_data)
                     if not df_charts.empty:
                         df_charts = df_charts.sort_values(by="Div/Jaar (€)", ascending=False)
-                        # Voeg CAGR toe aan hover data
                         fig_bar2 = px.bar(df_charts, x='Ticker', y='Div/Jaar (€)', color='Sector', 
                                           hover_data={'Div CAGR (%)': ':.2f'},
                                           color_discrete_map=SECTOR_COLORS)
@@ -1214,7 +1252,7 @@ elif st.session_state["authentication_status"]:
                     "Waarde (€)": st.column_config.NumberColumn("Waarde (€)", format="€ %.2f", disabled=True),
                     "Winst (€)": st.column_config.NumberColumn("Winst (€)", format="€ %.2f", disabled=True),
                     "Div/Jaar (€)": st.column_config.NumberColumn("Div/Jaar (€)", format="€ %.2f", disabled=True),
-                    "Div CAGR (%)": st.column_config.NumberColumn("Div Groei (3j %)", format="%.1f%%", disabled=True), # NIEUW
+                    "Div CAGR (%)": st.column_config.NumberColumn("Div Groei (3j %)", format="%.1f%%", disabled=True), 
                     "Datum": st.column_config.DateColumn("Datum", format="DD-MM-YYYY", min_value=date(1980, 1, 1), max_value=date(2050, 12, 31)),
                     "Weging": st.column_config.ProgressColumn("Weging", format="%.1f%%", min_value=0, max_value=100),
                     "Earnings": st.column_config.TextColumn("Earnings", disabled=True),
@@ -1377,6 +1415,7 @@ elif st.session_state["authentication_status"]:
 
             if st.button("⚠️ Portfolio Volledig Wissen"):
                 st.session_state['portfolio'] = []
+                st.session_state['dca_history'] = {}
                 save_portfolio_to_db()
                 st.rerun()
 
@@ -1463,7 +1502,7 @@ elif st.session_state["authentication_status"]:
     # TAB 4: BELASTING 
     # --------------------------------------------------
     with tabs[3]:
-        st.header("⚖️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
+        st.header("⚖️️ Box 3 Belasting Checker (Inclusief Tegenbewijsregeling)")
         st.markdown("""
         Volgens de uitspraak van de **Hoge Raad (juni 2024)** is de vermogensbelasting in strijd met Europees recht als je werkelijke rendement lager is dan het forfaitaire (fictieve) rendement. Je betaalt daarom **de laagste van de twee**.
         """)

@@ -455,7 +455,8 @@ elif st.session_state.get("authentication_status"):
             if data: return data
         return []
 
-    def render_classic_earnings_chart(earnings_list, title_text=None):
+    def render_classic_earnings_chart(earnings_list, title_text=None, chart_key="eps_chart_default"):
+        """Rendert een strakke, hoog-contrast Earnings grafiek met unieke key tegen StreamlitDuplicateElementId."""
         if not earnings_list:
             st.info("Geen kwartaal-earnings bekend voor deze positie (bijvoorbeeld bij ETF's).")
             return
@@ -491,7 +492,7 @@ elif st.session_state.get("authentication_status"):
         )
         fig_eps.update_xaxes(fixedrange=True, type='category', showgrid=False)
         fig_eps.update_yaxes(fixedrange=True, range=[min_y - pad * 0.5, max_y + pad], gridcolor='rgba(128,128,128,0.15)')
-        st.plotly_chart(fig_eps, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+        st.plotly_chart(fig_eps, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key=chart_key)
 
         latest = df_eps.iloc[-1]
         est, rep, pct = latest['estimate'], latest['reported'], latest['surprise']
@@ -684,26 +685,65 @@ elif st.session_state.get("authentication_status"):
         return df.pct_change().corr() if not df.empty and len(df.columns) > 1 else None
 
     @st.cache_data(ttl=3600, show_spinner=False)
-    def get_dca_benchmark_comparison(transactions_json, benchmark_ticker="VWCE.DE", filter_mode="STOCKS_ONLY"):
+    def get_dca_benchmark_comparison(portfolio_json, transactions_json, benchmark_ticker="VWCE.DE", filter_mode="STOCKS_ONLY"):
+        """
+        Zuivere 1-op-1 vergelijking op basis van jouw actuele openstaande posities:
+        Simuleert voor elke actieve positie vanaf de aankoopdatum exact dezelfde netto euro-inleg in de Benchmark ETF.
+        Zo is 'Volledige Portfolio' altijd exact de optelsom van 'Losse Aandelen' + 'ETF Posities'.
+        """
         try:
-            txs = json.loads(transactions_json)
-            if not txs: return None, None
-            df_tx = pd.DataFrame(txs)
-            df_tx = df_tx[df_tx['type'].isin(['BUY', 'SELL'])].copy()
-            if filter_mode == "STOCKS_ONLY" and 'asset_class' in df_tx.columns:
-                df_tx = df_tx[df_tx['asset_class'] != 'FUND'].copy()
-            if df_tx.empty: return None, None
+            port_items = json.loads(portfolio_json)
+            if not port_items:
+                return None, None
 
-            df_tx['date'] = pd.to_datetime(df_tx['date']).dt.tz_localize(None).dt.floor('D')
-            df_tx = df_tx.sort_values('date')
+            if filter_mode == "STOCKS_ONLY":
+                scoped_items = [p for p in port_items if p.get('Type') == 'Aandeel' and float(p.get('Aantal', 0)) > 0.0001 and float(p.get('Netto Inleg (€)', 0)) > 0]
+            else:
+                scoped_items = [p for p in port_items if float(p.get('Aantal', 0)) > 0.0001 and float(p.get('Netto Inleg (€)', 0)) > 0]
 
-            start_dt = max(df_tx['date'].min() - timedelta(days=3), pd.Timestamp(datetime.now() - timedelta(days=365*5)))
+            if not scoped_items:
+                return None, None
+
+            raw_txs = json.loads(transactions_json) if transactions_json else []
+            cashflows = []
+
+            for p in scoped_items:
+                t_sym = p['Ticker']
+                target_inleg = float(p['Netto Inleg (€)'])
+                target_shares = float(p['Aantal'])
+                fallback_dt = pd.to_datetime(p.get('Datum') or '2024-06-01').tz_localize(None).floor('D')
+
+                t_buys = [tx for tx in raw_txs if tx.get('ticker') == t_sym and tx.get('type') == 'BUY' and float(tx.get('amount_eur', 0)) > 0]
+                if t_buys:
+                    sum_buys_eur = sum(float(tx['amount_eur']) for tx in t_buys)
+                    sum_buys_sh = sum(float(tx.get('shares', 0)) for tx in t_buys)
+                    eur_factor = (target_inleg / sum_buys_eur) if sum_buys_eur > 0 else 1.0
+                    sh_factor = (target_shares / sum_buys_sh) if sum_buys_sh > 0 else 1.0
+                    for tx in t_buys:
+                        dt = pd.to_datetime(tx.get('date') or fallback_dt).tz_localize(None).floor('D')
+                        cashflows.append({
+                            'date': dt,
+                            'ticker': t_sym,
+                            'amount_eur': float(tx['amount_eur']) * eur_factor,
+                            'shares': float(tx.get('shares', 0)) * sh_factor
+                        })
+                else:
+                    cashflows.append({
+                        'date': fallback_dt,
+                        'ticker': t_sym,
+                        'amount_eur': target_inleg,
+                        'shares': target_shares
+                    })
+
+            df_cf = pd.DataFrame(cashflows).sort_values('date')
+            start_dt = max(df_cf['date'].min() - timedelta(days=3), pd.Timestamp(datetime.now() - timedelta(days=365*5)))
             end_dt = pd.Timestamp(datetime.now().date())
             full_idx = pd.date_range(start=start_dt, end=end_dt, freq='D')
 
             bm_tk = yf.Ticker(benchmark_ticker)
             bm_hist = bm_tk.history(start=(start_dt - timedelta(days=7)).strftime('%Y-%m-%d'))
-            if bm_hist is None or bm_hist.empty: return None, None
+            if bm_hist is None or bm_hist.empty:
+                return None, None
             if bm_hist.index.tz is not None: bm_hist.index = bm_hist.index.tz_localize(None)
             bm_hist.index = bm_hist.index.floor('D')
             bm_hist = bm_hist[~bm_hist.index.duplicated(keep='last')]
@@ -712,7 +752,7 @@ elif st.session_state.get("authentication_status"):
             bm_rate = get_currency_rate(bm_curr, "EUR")
             bm_daily = (bm_hist['Close'] * bm_rate).reindex(full_idx).ffill().bfill()
 
-            unique_tickers = [t for t in df_tx['ticker'].dropna().unique() if str(t).strip()]
+            unique_tickers = list(df_cf['ticker'].unique())
             ticker_daily_eur = {}
             for t in unique_tickers:
                 try:
@@ -727,61 +767,48 @@ elif st.session_state.get("authentication_status"):
                         else: t_curr = 'USD'
                         t_rate = get_currency_rate(t_curr, "EUR")
                         ticker_daily_eur[t] = (th['Close'] * t_rate).reindex(full_idx).ffill().bfill()
-                except Exception: pass
+                except Exception:
+                    pass
 
-            bm_units = net_invested = realized_bm_cash = 0.0
+            bm_units = 0.0
+            cum_inleg = 0.0
             holdings_shares = {t: 0.0 for t in unique_tickers}
-            holdings_cost_fallback = {t: 0.0 for t in unique_tickers}
+            holdings_inleg_fallback = {t: 0.0 for t in unique_tickers}
 
-            tx_grouped = df_tx.groupby('date')
+            cf_grouped = df_cf.groupby('date')
             dates_out, invested_out, bm_val_out, port_val_out = [], [], [], []
 
             for d in full_idx:
                 price_bm = float(bm_daily.loc[d])
-                if d in tx_grouped.groups:
-                    day_rows = tx_grouped.get_group(d)
-                    for _, r in day_rows.iterrows():
-                        amt = float(r.get('amount_eur', 0.0))
-                        t_sym = r.get('ticker')
-                        sh = float(r.get('shares', 0.0))
-                        if sh <= 0 and t_sym in ticker_daily_eur and ticker_daily_eur[t_sym].loc[d] > 0:
-                            sh = amt / float(ticker_daily_eur[t_sym].loc[d])
-
-                        if r['type'] == 'BUY' and price_bm > 0:
-                            if realized_bm_cash >= amt:
-                                realized_bm_cash -= amt
-                            else:
-                                extra_needed = amt - realized_bm_cash
-                                realized_bm_cash = 0.0
-                                net_invested += extra_needed
+                if d in cf_grouped.groups:
+                    for _, r in cf_grouped.get_group(d).iterrows():
+                        amt = float(r['amount_eur'])
+                        t_sym = r['ticker']
+                        sh = float(r['shares'])
+                        cum_inleg += amt
+                        if price_bm > 0:
                             bm_units += amt / price_bm
-                            if t_sym in holdings_shares:
-                                holdings_shares[t_sym] += sh
-                                holdings_cost_fallback[t_sym] += amt
-                        elif r['type'] == 'SELL' and price_bm > 0:
-                            units_to_sell = amt / price_bm
-                            if units_to_sell <= bm_units:
-                                bm_units -= units_to_sell
-                                realized_bm_cash += amt
-                            else:
-                                realized_bm_cash += bm_units * price_bm
-                                bm_units = 0.0
-                            if t_sym in holdings_shares:
-                                holdings_shares[t_sym] = max(0.0, holdings_shares[t_sym] - abs(sh))
-                                holdings_cost_fallback[t_sym] = max(0.0, holdings_cost_fallback[t_sym] - amt)
+                        holdings_shares[t_sym] += sh
+                        holdings_inleg_fallback[t_sym] += amt
 
                 port_val_d = 0.0
                 for t_sym, qty in holdings_shares.items():
-                    if qty > 0.0001:
+                    if qty > 0:
                         if t_sym in ticker_daily_eur and not pd.isna(ticker_daily_eur[t_sym].loc[d]):
                             port_val_d += qty * float(ticker_daily_eur[t_sym].loc[d])
                         else:
-                            port_val_d += holdings_cost_fallback.get(t_sym, 0.0)
+                            port_val_d += holdings_inleg_fallback[t_sym]
 
                 dates_out.append(d)
-                invested_out.append(net_invested)
-                bm_val_out.append((bm_units * price_bm) + realized_bm_cash)
+                invested_out.append(cum_inleg)
+                bm_val_out.append(bm_units * price_bm)
                 port_val_out.append(port_val_d)
+
+            total_div_scope = sum(float(p.get('Ontvangen Div (€)', 0.0)) for p in scoped_items)
+            if port_val_out and port_val_out[-1] > 0:
+                actual_live_now = sum(float(p.get('Waarde (€)', 0.0)) for p in scoped_items) + total_div_scope
+                drift_ratio = actual_live_now / port_val_out[-1]
+                port_val_out = [v * drift_ratio for v in port_val_out]
 
             df_res = pd.DataFrame({
                 'Datum': dates_out,
@@ -1428,7 +1455,7 @@ elif st.session_state.get("authentication_status"):
                         hovertemplate="<b>%{customdata[0]} (%{label})</b><br>Waarde: € %{value:,.2f}<br>Winst: € %{customdata[2]:,.2f} (%{customdata[3]:+.1f}%)<br>Dag: %{customdata[4]:+.2f}%<br>Weging: %{customdata[5]:.1f}%<extra></extra>"
                     )
                     fig_tm.update_layout(height=400, margin=dict(t=15, b=10, l=0, r=0), paper_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_tm, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_tm, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_treemap")
 
                 st.divider()
                 st.markdown("#### 🏆 Performance Benchmark: Losse Aandelen vs. All-World ETF's")
@@ -1460,7 +1487,7 @@ elif st.session_state.get("authentication_status"):
                     fig_vs.update_layout(title=dict(text="Rendement op Inleg (%)", font=dict(size=13)), height=230, margin=dict(t=40, b=10, l=10, r=10), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                     fig_vs.update_xaxes(fixedrange=True)
                     fig_vs.update_yaxes(fixedrange=True, range=[min(0, min(etf_pct, stock_pct)*1.3), max_r], ticksuffix="%")
-                    st.plotly_chart(fig_vs, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_vs, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_vs_bar")
 
                 st.divider()
                 comp1, comp2, comp3 = st.columns(3)
@@ -1472,7 +1499,7 @@ elif st.session_state.get("authentication_status"):
                         marker=dict(colors=[MATTE_COLORS["charcoal"], MATTE_COLORS["blue"]], line=dict(color='white', width=1.5))
                     )])
                     fig_d1.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5), height=300, margin=dict(t=15, b=45, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_d1, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_d1, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_pie_type")
 
                 with comp2:
                     st.markdown("##### 🏭 Sectorverdeling")
@@ -1485,7 +1512,7 @@ elif st.session_state.get("authentication_status"):
                             hovertemplate="<b>%{label}</b><br>€ %{value:,.2f} (%{percent})<extra></extra>"
                         )])
                         fig_d2.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5, font=dict(size=11)), height=300, margin=dict(t=15, b=65, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)')
-                        st.plotly_chart(fig_d2, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                        st.plotly_chart(fig_d2, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_pie_sector")
 
                 with comp3:
                     st.markdown("##### 🌍 Landen & Regioverdeling")
@@ -1498,7 +1525,7 @@ elif st.session_state.get("authentication_status"):
                             hovertemplate="<b>%{label}</b><br>€ %{value:,.2f} (%{percent})<extra></extra>"
                         )])
                         fig_d3.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="top", y=-0.05, xanchor="center", x=0.5, font=dict(size=11)), height=300, margin=dict(t=15, b=65, l=10, r=10), paper_bgcolor='rgba(0,0,0,0)')
-                        st.plotly_chart(fig_d3, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                        st.plotly_chart(fig_d3, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_pie_country")
 
             # SUB-TAB 2: POSITIES & BEHEER
             with sub_tabs[1]:
@@ -1602,41 +1629,13 @@ elif st.session_state.get("authentication_status"):
                     )
 
                 with bm_col2:
-                    raw_txs = st.session_state.get('transactions', [])
-                    if raw_txs:
-                        sim_tx = raw_txs
-                    else:
-                        if filter_mode == "STOCKS_ONLY":
-                            sim_tx = [
-                                {'ticker': p['Ticker'], 'type': 'BUY', 'shares': float(p['Aantal']), 'asset_class': 'STOCK', 'amount_eur': float(p['Netto Inleg (€)']), 'date': str(p['Datum'] or '2024-06-01')}
-                                for p in portfolio_data if p['Type'] == 'Aandeel' and float(p['Netto Inleg (€)']) > 0
-                            ]
-                        else:
-                            sim_tx = [
-                                {'ticker': p['Ticker'], 'type': 'BUY', 'shares': float(p['Aantal']), 'asset_class': 'FUND' if p['Type'] == 'ETF' else 'STOCK', 'amount_eur': float(p['Netto Inleg (€)']), 'date': str(p['Datum'] or '2024-06-01')}
-                                for p in portfolio_data if float(p['Netto Inleg (€)']) > 0
-                            ]
+                    port_json = json.dumps(portfolio_data, default=str)
+                    tx_json = json.dumps(st.session_state.get('transactions', []), default=str)
 
-                    actual_val_now = (stock_stats['value'] + stock_stats['dividends']) if filter_mode == "STOCKS_ONLY" else (total_val_eur + total_received_div_eur)
-                    active_inleg_scope = stock_stats['active_inleg'] if filter_mode == "STOCKS_ONLY" else active_inleg_sum
-
-                    tx_json = json.dumps(sim_tx, default=str)
-                    with st.spinner("Historische portfoliolijn en DCA-benchmark doorrekenen..."):
-                        df_dca_bm, bm_final_val = get_dca_benchmark_comparison(tx_json, bm_choice[0], filter_mode=filter_mode)
+                    with st.spinner("Historische portfoliolijn en DCA-benchmark 1-op-1 doorrekenen..."):
+                        df_dca_bm, bm_final_val = get_dca_benchmark_comparison(port_json, tx_json, bm_choice[0], filter_mode=filter_mode)
 
                     if df_dca_bm is not None and not df_dca_bm.empty:
-                        last_sim_port = float(df_dca_bm['Jouw Portfolio (€)'].iloc[-1])
-                        if last_sim_port > 0 and actual_val_now > 0:
-                            scale_factor = actual_val_now / last_sim_port
-                            df_dca_bm['Jouw Portfolio (€)'] = df_dca_bm['Jouw Portfolio (€)'] * scale_factor
-
-                        bm_inleg_end = float(df_dca_bm['Cumulatieve Netto Inleg (€)'].iloc[-1])
-                        if bm_inleg_end > 0 and active_inleg_scope > 0 and abs(bm_inleg_end - active_inleg_scope) / active_inleg_scope > 0.05:
-                            inleg_ratio = active_inleg_scope / bm_inleg_end
-                            df_dca_bm['Cumulatieve Netto Inleg (€)'] *= inleg_ratio
-                            df_dca_bm['DCA in Benchmark (€)'] *= inleg_ratio
-                            bm_final_val = float(df_dca_bm['DCA in Benchmark (€)'].iloc[-1])
-
                         port_final_val = float(df_dca_bm['Jouw Portfolio (€)'].iloc[-1])
                         inleg_final_val = float(df_dca_bm['Cumulatieve Netto Inleg (€)'].iloc[-1])
                         diff_eur_vs_bm = port_final_val - bm_final_val
@@ -1682,7 +1681,7 @@ elif st.session_state.get("authentication_status"):
                         )
                         fig_bm.update_xaxes(fixedrange=True)
                         fig_bm.update_yaxes(fixedrange=True, gridcolor='rgba(128,128,128,0.15)')
-                        st.plotly_chart(fig_bm, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                        st.plotly_chart(fig_bm, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_benchmark")
                     else:
                         st.info("Voeg eerst een aankoopdatum en positie toe om de historische DCA-benchmark te berekenen.")
 
@@ -1695,7 +1694,7 @@ elif st.session_state.get("authentication_status"):
                     fig_dca.update_layout(height=300, margin=dict(t=35, b=15, l=10, r=10), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                     fig_dca.update_xaxes(fixedrange=True)
                     fig_dca.update_yaxes(fixedrange=True, gridcolor='rgba(128,128,128,0.15)')
-                    st.plotly_chart(fig_dca, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_dca, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_dca_timeline")
 
                 st.divider()
                 st.markdown("#### 🔗 Risico & Correlatie Matrix (Top 10 Posities)")
@@ -1707,7 +1706,7 @@ elif st.session_state.get("authentication_status"):
                         fig_corr.update_layout(height=420, margin=dict(t=25, b=15, l=10, r=10), plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                         fig_corr.update_xaxes(fixedrange=True)
                         fig_corr.update_yaxes(fixedrange=True)
-                        st.plotly_chart(fig_corr, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                        st.plotly_chart(fig_corr, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_correlation")
 
             # SUB-TAB 4: DIVIDEND & CASHFLOW
             with sub_tabs[3]:
@@ -1722,7 +1721,7 @@ elif st.session_state.get("authentication_status"):
                 fig_div.update_layout(height=300, margin=dict(t=35, b=20, l=10, r=10), yaxis_title="Dividend (€)", plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
                 fig_div.update_xaxes(fixedrange=True)
                 fig_div.update_yaxes(fixedrange=True, range=[0, max_div_m * 1.25], gridcolor='rgba(128,128,128,0.15)')
-                st.plotly_chart(fig_div, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                st.plotly_chart(fig_div, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_dividend_calendar")
 
                 st.divider()
                 st.markdown("#### 🏅 Top Dividendbetalers in je Portfolio")
@@ -1754,7 +1753,7 @@ elif st.session_state.get("authentication_status"):
                     )
                     if selected_earn_ticker:
                         full_name = ticker_details_map.get(selected_earn_ticker, {}).get('longName', selected_earn_ticker)
-                        render_classic_earnings_chart(earnings_history_store[selected_earn_ticker], title_text=f"Kwartaalcijfers (EPS): {full_name}")
+                        render_classic_earnings_chart(earnings_history_store[selected_earn_ticker], title_text=f"Kwartaalcijfers (EPS): {full_name}", chart_key=f"tab1_earn_{selected_earn_ticker}")
                 else:
                     st.info("Geen recente kwartaal-earnings gevonden voor je huidige aandelen.")
 
@@ -1793,7 +1792,7 @@ elif st.session_state.get("authentication_status"):
                     )
                     fig_proj.update_xaxes(fixedrange=True)
                     fig_proj.update_yaxes(fixedrange=True, gridcolor='rgba(128,128,128,0.15)')
-                    st.plotly_chart(fig_proj, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_proj, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_fire_projection")
 
     # --------------------------------------------------
     # TAB 2: AANDELEN ANALYSE (GEEN N/A'S MEER)
@@ -1960,7 +1959,7 @@ elif st.session_state.get("authentication_status"):
                         fig_p.update_xaxes(fixedrange=True)
                         fig_p.update_yaxes(fixedrange=True, gridcolor='rgba(128,128,128,0.15)')
 
-                    st.plotly_chart(fig_p, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM)
+                    st.plotly_chart(fig_p, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key=f"chart_analysis_price_{selected_ticker}")
 
                 st.divider()
                 st.markdown("#### 🧮 Fundamentele Kerncijfers & Ratio's")
@@ -1987,7 +1986,7 @@ elif st.session_state.get("authentication_status"):
                 col_earn_an, col_news_an = st.columns([1.35, 1.65])
                 with col_earn_an:
                     earn_list = get_reliable_earnings(selected_ticker)
-                    render_classic_earnings_chart(earn_list, title_text="📊 Kwartaal Earnings (Verwacht vs. Werkelijk)")
+                    render_classic_earnings_chart(earn_list, title_text="📊 Kwartaal Earnings (Verwacht vs. Werkelijk)", chart_key=f"tab2_earn_{selected_ticker}")
 
                 with col_news_an:
                     st.markdown("##### 📰 Laatste Beursnieuws & Video Analyse")

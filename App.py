@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit_authenticator as stauth
 
 # ==================================================
-# 1. CONFIGURATIE, STYLING & AUTHENTICATIE
+# 1. CONFIGURATIE, STYLING & AUTHENTICATIE UIT SECRETS
 # ==================================================
 st.set_page_config(page_title="Aandelen Dashboard Pro", layout="wide", page_icon="📈", initial_sidebar_state="expanded")
 
@@ -47,15 +47,21 @@ st.markdown('''
 </style>
 ''', unsafe_allow_html=True)
 
+# Geheime inloggegevens veilig ophalen uit Streamlit Secrets
+auth_user = st.secrets.get("AUTH_USER", "admin")
+auth_name = st.secrets.get("AUTH_NAME", "Portfolio Beheerder")
+auth_hash = st.secrets.get("AUTH_HASH", "")
+cookie_key = st.secrets.get("COOKIE_KEY", "random_secure_cookie_key_987654321")
+
 credentials = {
     'usernames': {
-        'admin': {
-            'name': 'Maarten Broekstra',
-            'password': '6f9a2b8c4d1e7f3a9b0c5e8d2f1a4c7b9e0d1f3a6b8c5d2e7f9a1b0c4e8d2f'
+        auth_user: {
+            'name': auth_name,
+            'password': auth_hash
         }
     }
 }
-authenticator = stauth.Authenticate(credentials, 'portfolio_dashboard_cookie', 'abcdef', cookie_expiry_days=30)
+authenticator = stauth.Authenticate(credentials, 'portfolio_dashboard_cookie', cookie_key, cookie_expiry_days=30)
 
 # ==================================================
 # 2. DATABASE & ATOMIC PERSISTENCE
@@ -456,7 +462,6 @@ elif st.session_state.get("authentication_status"):
         return []
 
     def render_classic_earnings_chart(earnings_list, title_text=None, chart_key="eps_chart_default"):
-        """Rendert een strakke, hoog-contrast Earnings grafiek met unieke key tegen StreamlitDuplicateElementId."""
         if not earnings_list:
             st.info("Geen kwartaal-earnings bekend voor deze positie (bijvoorbeeld bij ETF's).")
             return
@@ -686,11 +691,6 @@ elif st.session_state.get("authentication_status"):
 
     @st.cache_data(ttl=3600, show_spinner=False)
     def get_dca_benchmark_comparison(portfolio_json, transactions_json, benchmark_ticker="VWCE.DE", filter_mode="STOCKS_ONLY"):
-        """
-        Zuivere 1-op-1 vergelijking op basis van jouw actuele openstaande posities:
-        Simuleert voor elke actieve positie vanaf de aankoopdatum exact dezelfde netto euro-inleg in de Benchmark ETF.
-        Zo is 'Volledige Portfolio' altijd exact de optelsom van 'Losse Aandelen' + 'ETF Posities'.
-        """
         try:
             port_items = json.loads(portfolio_json)
             if not port_items:
@@ -842,8 +842,9 @@ elif st.session_state.get("authentication_status"):
             vids = re.findall(r"watch\?v=(\S{11})", r.text)
             return vids[0] if vids else None
         except Exception: return None
+
     # ==================================================
-    # 7. VERBETERDE DATA ENGINE & AI SCORE (GEEN N/A'S MEER)
+    # 7. DATA ENGINE & AI SCORE
     # ==================================================
     class DataEngine:
         def __init__(self, us_ticker, original_ticker):
@@ -1169,8 +1170,8 @@ elif st.session_state.get("authentication_status"):
     # ==================================================
     # 9. SIDEBAR
     # ==================================================
-    user_name = st.session_state.get("name", "Gebruiker")
-    st.sidebar.markdown(f"### 👤 {user_name}")
+    user_display = st.session_state.get("name", auth_name)
+    st.sidebar.markdown(f"### 👤 {user_display}")
     authenticator.logout('Uitloggen', 'sidebar')
     st.sidebar.divider()
 
@@ -1592,7 +1593,8 @@ elif st.session_state.get("authentication_status"):
                     if st.button("🗑️ Portfolio Definitief Wissen", disabled=not confirm_reset):
                         st.session_state['portfolio'], st.session_state['dca_history'], st.session_state['transactions'] = [], {}, []
                         save_portfolio_to_db(); st.rerun()
-            # SUB-TAB 3: EERLIJKE BENCHMARK & RISICO (VOLLEDIGE TIJDREEKS + ECHTE BETA)
+
+            # SUB-TAB 3: BENCHMARK & RISICO
             with sub_tabs[2]:
                 st.markdown("#### 🏆 Aandelen vs. All-World Benchmark Analyse")
                 st.caption("Vergelijk de historische waardeontwikkeling van jouw portefeuille met wat exact dezelfde euro-inleg op dezelfde dagen in een All-World ETF of S&P 500 had opgeleverd.")
@@ -1795,7 +1797,7 @@ elif st.session_state.get("authentication_status"):
                     st.plotly_chart(fig_proj, use_container_width=True, config=PLOTLY_CONFIG_NO_ZOOM, key="chart_fire_projection")
 
     # --------------------------------------------------
-    # TAB 2: AANDELEN ANALYSE (GEEN N/A'S MEER)
+    # TAB 2: AANDELEN ANALYSE
     # --------------------------------------------------
     with tabs[1]:
         st.subheader("🔎 Fundamentele & Technische Aandelen Analyse")
@@ -2010,7 +2012,7 @@ elif st.session_state.get("authentication_status"):
                             st.caption("Geen directe video gevonden.")
 
     # --------------------------------------------------
-    # TAB 3: WISHLIST & KOOPZONES (VEILIG TEGEN TYPE-ERRORS)
+    # TAB 3: WISHLIST & KOOPZONES
     # --------------------------------------------------
     with tabs[2]:
         st.subheader("❤️ Wishlist & Koopzone Bewaking")
@@ -2091,7 +2093,7 @@ elif st.session_state.get("authentication_status"):
                 st.rerun()
 
     # --------------------------------------------------
-    # TAB 4: BOX 3 BELASTING (FORFAITAIR VS WERKELIJK)
+    # TAB 4: BOX 3 BELASTING
     # --------------------------------------------------
     with tabs[3]:
         st.subheader("🇳🇱 Box 3 Vermogensrendementsheffing (2025 / 2026)")
